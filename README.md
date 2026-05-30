@@ -16,14 +16,15 @@ The three upstream academic MCPs (`academix`, `paper-search-mcp`, `paper-distill
 
 | Tool | What It Does | Sources |
 |---|---|---|
-| `search_literature` | Federated search across 8-21 backends with dedup, query expansion, and auto-citation walking | Academix + Paper Search |
+| `search_literature` | Federated search across 6 major sources with dedup, query expansion, and auto-citation walking | Academix + Paper Search |
 | `paper_lookup` | Paper details by DOI, arXiv ID, OpenAlex ID, or Semantic Scholar ID | Academix + CrossRef |
 | `citation_intelligence` | Citing papers, references, related work, or full citation network graph | Academix (Semantic Scholar) |
 | `walk_citations` | Multi-hop citation chain walker (follow citation graphs N hops deep) | Academix |
 | `author_literature` | Find all papers by a specific author with year filters | Academix |
 | `export_bibliography` | BibTeX export with LaTeX-aware escaping and DBLP native lookup | Academix |
-| `search_specific_sources` | Direct source control — pick exactly which databases to query | Paper Search |
-| `read_paper` | Full-text PDF download + text extraction from 11+ open-access sources | Paper Search |
+| `search_specific_sources` | Direct source control — pick exactly which databases to query (including **Scopus** and **Springer**) | Paper Search + Publisher APIs |
+| `search_scihub` | Dedicated Sci-Hub download by DOI, title, PMID, or URL | Paper Search |
+| `read_paper` | Full-text PDF download + text extraction from 12+ open-access sources | Paper Search |
 | `batch_read` | Concurrent full-text extraction for multiple papers | Paper Search |
 | `curate_research` | Paper ranking, dedup filtering, review prompt generation | Paper Distill |
 | `paper_distill_pipeline` | Session management, topic preferences, Zotero collection, push digests | Paper Distill |
@@ -31,16 +32,17 @@ The three upstream academic MCPs (`academix`, `paper-search-mcp`, `paper-distill
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│              research_bundle.py                  │
-│         Single FastMCP server process            │
-├─────────────┬──────────────┬────────────────────┤
-│  Academix   │ Paper Search │   Paper Distill    │
-│  Search metadata   │ 6 default (21+ via search_specific_sources)  │   curation   │
-│  citations  │ PDF download │   ranking          │
-│  BibTeX     │ text extract │   digests          │
-│  networks   │ Sci-Hub/OA   │   Zotero           │
-└─────────────┴──────────────┴────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                  research_bundle.py                      │
+│             Single FastMCP server process                 │
+├─────────────┬──────────────┬────────────┬───────────────┤
+│  Academix   │ Paper Search │  Paper     │  Publisher    │
+│  metadata   │ 6 default    │  Distill   │  APIs         │
+│  citations  │ PDF download │  curation  │  Scopus       │
+│  BibTeX     │ text extract │  ranking   │  Springer     │
+│  networks   │ Sci-Hub/OA   │  digests   │  Sci-Hub      │
+│             │              │  Zotero    │               │
+└─────────────┴──────────────┴────────────┴───────────────┘
 ```
 
 The bundle uses `sys.path` injection to import from all three upstream packages in a single Python process. No subprocesses, no IPC — just direct function calls.
@@ -56,7 +58,7 @@ The default `search_literature` tool queries 6 high-impact sources that cover 95
 | **Biomedical** | PubMed |
 | **Open access** | Unpaywall |
 
-For niche sources, use `search_specific_sources` — it can query any of these additional backends: bioRxiv, medRxiv, IACR ePrint, DBLP, PMC, EuropePMC, CORE, OpenAIRE, DOAJ, BASE, HAL, Zenodo, SSRN, CiteSeerX.
+For niche sources, use `search_specific_sources` — it can query any of these additional backends: **Scopus** (Elsevier), **Springer Nature**, bioRxiv, medRxiv, IACR ePrint, DBLP, PMC, EuropePMC, CORE, OpenAIRE, DOAJ, BASE, HAL, Zenodo, SSRN, CiteSeerX.
 
 ## Features
 
@@ -68,9 +70,11 @@ For niche sources, use `search_specific_sources` — it can query any of these a
 - **Auto-citation walking**: Automatically follows citation graphs for top results
 
 ### Full-Text Access
-- **11 source-specific readers**: arXiv, Semantic Scholar, bioRxiv, medRxiv, IACR, OpenAIRE, CiteSeerX, DOAJ, BASE, Zenodo, HAL
-- **Smart fallback cascade**: Tries source-native → OA repositories → Unpaywall → (optional Sci-Hub)
+- **12 source-specific readers**: arXiv, Semantic Scholar, bioRxiv, medRxiv, IACR, OpenAIRE, CiteSeerX, DOAJ, BASE, Zenodo, HAL, Sci-Hub
+- **Smart fallback cascade**: Tries source-native → OA repositories → Unpaywall → Sci-Hub (optional)
+- **Dedicated Sci-Hub tool**: `search_scihub(identifier)` — direct download by DOI, title, PMID, or URL
 - **PDF text extraction**: Uses `pypdf` for page-by-page extraction
+- **Use Sci-Hub in read_paper**: `read_paper(paper_id="...", use_scihub=True)` enables the Sci-Hub fallback
 
 ### Citation Analysis
 - **Citation intelligence**: Citing papers, references, related work in one call
@@ -161,7 +165,9 @@ python /path/to/research_bundle.py
 | Variable | Required | Description |
 |---|---|---|
 | `UNPAYWALL_EMAIL` | Recommended | Email for Unpaywall OA resolution. Use your institutional email for better access to paywalled papers. |
-| `SEMANTIC_SCHOLAR_API_KEY` | Optional | Higher rate limits for Semantic Scholar (free key at [api.semanticscholar.org](https://api.semanticscholar.org/)) |
+| `SEMANTIC_SCHOLAR_API_KEY` | Recommended | Higher rate limits for Semantic Scholar (free key at [api.semanticscholar.org](https://api.semanticscholar.org/)) |
+| `ELSEVIER_API_KEY` | Optional | Enables Scopus search via Elsevier API (free key at [dev.elsevier.com](https://dev.elsevier.com/)) |
+| `SPRINGER_API_KEY` | Optional | Enables Springer Nature search (free key at [dev.springernature.com](https://dev.springernature.com/)) |
 
 ## Usage Examples
 
@@ -206,6 +212,29 @@ walk_citations(
 export_bibliography(paper_ids=["2305.14283", "10.1038/s41586-020-2649-2"])
 ```
 
+### Search Scopus or Springer
+
+```
+search_specific_sources(
+    query="deep learning medical imaging",
+    sources="scopus,springer",
+    max_results_per_source=10
+)
+```
+
+### Download via Sci-Hub
+
+```
+search_scihub(identifier="10.1038/s41586-020-2649-2")  # by DOI
+search_scihub(identifier="Attention Is All You Need")   # by title
+```
+
+### Read paper with Sci-Hub fallback
+
+```
+read_paper(paper_id="10.1038/s41586-020-2649-2", use_scihub=True)
+```
+
 ## Tool Comparison
 
 | Capability | Separate MCPs (3 servers) | This Bundle (1 server) |
@@ -237,7 +266,7 @@ This bundle design is informed by:
 
 ## Contributing
 
-Contributions welcome. The bundle is intentionally thin (~740 lines) — it delegates to upstream packages. Changes should keep the tool surface compact.
+Contributions welcome. The bundle is intentionally thin (~800 lines) — it delegates to upstream packages. Changes should keep the tool surface compact.
 
 ## License
 
