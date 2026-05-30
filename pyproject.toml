@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "research-mcp"
+version = "0.1.0"
+description = "Bundled MCP server unifying 21+ academic research sources"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "academix",
+    "paper-search-mcp",
+    "paper-distill-mcp",
+    "fastmcp",
+]
+
+[project.scripts]
+research-mcp = "research_bundle:main"
