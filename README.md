@@ -48,26 +48,87 @@ The three upstream academic MCPs (`academix`, `paper-search-mcp`, `paper-distill
 
 ## Agent Workflow
 
-This MCP is designed for a **multi-pass reading pattern**:
+### The Core Insight
+
+**More tokens ≠ better reasoning.** LLMs have an "attention sweet spot" — beyond ~30K tokens of raw text, synthesis quality drops. The best-case scenario isn't "dump everything in context." It's **multi-pass selective extraction**.
+
+The MCP is the **retrieval layer**. The agent is the **reasoning layer**. The boundary is clear.
+
+### The Multi-Pass Pattern
 
 ```
-1. search_literature(query="RAG literature discovery")
-   → Returns 20 papers with metadata + abstracts
+Pass 1: CLASSIFY what you need
+  Agent: "I need to compare methods across 5 papers"
+  → Action: extract_sections with sections=["methods", "findings"]
 
-2. extract_sections(papers[0].arxiv_id, sections=["methods","findings"])
-   → Returns ~3K tokens of relevant sections (not 15K full text)
+Pass 2: SELECTIVE extraction (NOT full text)
+  paper_1 → extract_sections(["methods","findings"])  → ~3,000 tokens
+  paper_2 → extract_sections(["methods","findings"])  → ~3,000 tokens
+  paper_3 → extract_sections(["methods","findings"])  → ~3,000 tokens
+                              TOTAL: ~9,000 tokens (not 45,000)
 
-3. extract_sections(papers[1].arxiv_id, sections=["methods","findings"])
-   → Returns ~3K tokens of relevant sections
+Pass 3: BUILD a synthesis matrix before writing
+  ┌──────────┬────────────────────┬─────────────────────┬──────────────────┐
+  │ Paper    │ Method             │ Key Finding         │ Limitation       │
+  ├──────────┼────────────────────┼─────────────────────┼──────────────────┤
+  │ Wang 24  │ RAG-MCP            │ 50% token reduction │ CS-only testing  │
+  │ Liu 23   │ Citation walking   │ +15% recall         │ 8s per query     │
+  │ Chen 24  │ Multi-source fusion│ +22% precision      │ Needs 3+ keys    │
+  └──────────┴────────────────────┴─────────────────────┴──────────────────┘
 
-4. compare_papers(papers=[p1, p2, p3], aspects=["method","finding"])
-   → Structured side-by-side comparison table
-
-5. read_paper(paper_id)  ← Only if you need the complete document
-   → Full text extraction
+Pass 4: WRITE from the matrix, not from the papers
+  Matrix = ~2K tokens. Raw papers = ~45K tokens.
+  The matrix IS the distilled knowledge.
 ```
 
-**Why this works:** The agent reads selectively (~9K tokens) instead of dumping all full text (~45K tokens). The attention mechanism works better with focused, structured information.
+### What the MCP Should (and Shouldn't) Do
+
+| MCP (Tool Layer) | Agent (Reasoning Layer) |
+|---|---|
+| Search for papers | Decide what to search for |
+| Extract specific sections | Synthesize findings across papers |
+| Compare papers side-by-side | Build the synthesis matrix |
+| Download full text PDF | Write the final report |
+| Walk citation graphs | Interpret citation patterns |
+
+**The MCP should NOT:** summarize papers, compare findings analytically, write synthesis, or check venue quality. Those are the agent's job.
+
+### Agent Best Practices
+
+1. **Never read full text unless you have to** — use `extract_sections` first
+2. **Build a matrix before writing** — structured comparison beats free-form reading
+3. **One paper at a time** — sequential extraction with matrix building, not parallel full-text dumps
+4. **Synthesize from the matrix, not from the papers** — the matrix is the distilled knowledge
+
+### Token Budget Example
+
+| Approach | Tokens Consumed | Synthesis Quality |
+|---|---|---|
+| Dump all 10 full papers | ~80,000 | Poor (attention decay) |
+| extract_sections per paper | ~12,000 | High (focused extraction) |
+| Matrix + synthesis | ~2,000 | High (distilled knowledge) |
+
+### Full Workflow Example
+
+```
+Agent: "Compare RAG-based vs citation-based approaches for literature discovery"
+
+MCP: search_literature(query="RAG literature discovery", max_results=10)
+     → Returns 10 papers with metadata + abstracts
+
+MCP: extract_sections(papers[0].arxiv_id, sections=["methods","findings"])
+     → Returns ~3K tokens of relevant sections only
+
+MCP: extract_sections(papers[1].arxiv_id, sections=["methods","findings"])
+     → Returns ~3K tokens of relevant sections
+
+Agent: [builds synthesis matrix from extracted sections]
+
+Agent: [writes comparison from matrix, not from raw text]
+
+Total tokens: ~12K (matrix + extracted sections)
+vs dumping all 10 full papers: ~80K (attention decay kicks in)
+```
 
 ## Sources
 
