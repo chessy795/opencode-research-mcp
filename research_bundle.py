@@ -195,7 +195,7 @@ def _expand_query(query: str) -> list[str]:
         if word in acronyms:
             for expansion in acronyms[word]:
                 expansions.append(query.lower().replace(word, expansion))
-    return expansions[:3]
+    return expansions[:2]
 
 
 def _detect_source_from_paper(paper: dict[str, Any]) -> str:
@@ -280,7 +280,13 @@ async def search_literature(
             ),
         ])
 
-    outputs = await asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        outputs = await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=45.0,
+        )
+    except asyncio.TimeoutError:
+        outputs = [asyncio.TimeoutError("Search timed out after 45s")] * len(tasks)
     papers: list[dict[str, Any]] = []
     errors: dict[str, str] = {}
 
@@ -321,8 +327,7 @@ async def search_literature(
             if pid:
                 walk_ids.append(pid)
 
-        citation_papers: list[dict[str, Any]] = []
-        for pid in walk_ids:
+        async def _fetch_citations(pid: str) -> list[dict[str, Any]]:
             try:
                 citations_data = _json_load(
                     await academix_server.academic_get_citations(
@@ -330,10 +335,18 @@ async def search_literature(
                     )
                 )
                 citing = citations_data.get("citing_papers", []) if isinstance(citations_data, dict) else []
-                for cp in citing[:5]:
-                    citation_papers.append(_normalize_paper(cp, "citation-walk"))
+                return [_normalize_paper(cp, "citation-walk") for cp in citing[:5]]
             except Exception:
-                pass
+                return []
+
+        citation_results = await asyncio.gather(
+            *[_fetch_citations(pid) for pid in walk_ids],
+            return_exceptions=True,
+        )
+        citation_papers: list[dict[str, Any]] = []
+        for r in citation_results:
+            if isinstance(r, list):
+                citation_papers.extend(r)
 
         if citation_papers:
             all_papers = merged + citation_papers
