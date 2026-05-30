@@ -5,8 +5,11 @@
       "type": "local",
       "command": ["python", "research_bundle.py"],
       "env": {
+        "UNPAYWALL_EMAIL": "your.email@institution.edu",
         "ACADEMIX_EMAIL": "your.email@institution.edu",
-        "UNPAYWALL_EMAIL": "your.email@institution.edu"
+        "SEMANTIC_SCHOLAR_API_KEY": "your-key-from-api.semanticscholar.org",
+        "ELSEVIER_API_KEY": "your-key-from-dev.elsevier.com",
+        "SPRINGER_API_KEY": "your-key-from-dev.springernature.com"
       },
       "enabled": true
     }

@@ -223,6 +223,40 @@ def _detect_source_from_paper(paper: dict[str, Any]) -> str:
 # Core tools
 # ---------------------------------------------------------------------------
 
+async def _check_scihub_batch(papers: list[dict[str, Any]]) -> dict[str, bool]:
+    """Check Sci-Hub availability for papers with DOIs (non-blocking, best-effort)."""
+    import httpx
+    dois = [p.get("doi") for p in papers if p.get("doi")]
+    if not dois:
+        return {}
+    sci_hub_urls = [
+        "https://sci-hub.se",
+        "https://sci-hub.st",
+        "https://sci-hub.ru",
+    ]
+    availability: dict[str, bool] = {}
+
+    async def _check_one(doi: str) -> tuple[str, bool]:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=8.0) as client:
+            for base in sci_hub_urls:
+                try:
+                    resp = await client.get(f"{base}/{doi}", timeout=8.0)
+                    if resp.status_code == 200 and "pdf" in resp.headers.get("content-type", "").lower():
+                        return doi, True
+                    if resp.status_code == 200 and b"%PDF-" in resp.content[:20]:
+                        return doi, True
+                except Exception:
+                    continue
+        return doi, False
+
+    tasks = [_check_one(doi) for doi in dois]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for r in results:
+        if isinstance(r, tuple):
+            availability[r[0]] = r[1]
+    return availability
+
+
 @mcp.tool()
 async def search_literature(
     query: str,
@@ -233,6 +267,7 @@ async def search_literature(
     auto_cite_walk: bool = True,
     cite_walk_depth: int = 1,
     cite_walk_max_papers: int = 3,
+    check_scihub: bool = False,
 ) -> dict[str, Any]:
     """Best default literature search across 6 major academic sources.
 
@@ -250,6 +285,7 @@ async def search_literature(
         auto_cite_walk: Auto-walk citation graph for top results
         cite_walk_depth: Citation graph walk depth (1=direct citations only)
         cite_walk_max_papers: How many top papers to walk citations for
+        check_scihub: Add Sci-Hub availability field to each paper (slower, ~8s per batch)
     """
     year = None
     if year_from and year_to:
@@ -352,6 +388,18 @@ async def search_literature(
             all_papers = merged + citation_papers
             result["papers"] = _merge_papers(all_papers, max_results + 10)
             result["citation_walk_found"] = len(citation_papers)
+
+    if check_scihub:
+        try:
+            scihub_map = await _check_scihub_batch(result["papers"])
+            for p in result["papers"]:
+                doi = p.get("doi")
+                if doi and doi in scihub_map:
+                    p["scihub_available"] = scihub_map[doi]
+            result["scihub_checked"] = len(scihub_map)
+            result["scihub_available_count"] = sum(1 for v in scihub_map.values() if v)
+        except Exception:
+            pass
 
     return result
 
@@ -603,7 +651,7 @@ async def read_paper(
     doi: str = "",
     title: str = "",
     save_path: str = "./downloads",
-    use_scihub: bool = True,
+    use_scihub: bool = False,
 ) -> dict[str, Any]:
     """Download and extract full text from a paper.
 
