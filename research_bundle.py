@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
-from publisher_apis import search_scopus, search_springer
+from publisher_apis import search_scopus, search_springer, springer_resolve_oa
 
 TOOL_SITE_PACKAGES = [
     Path.home() / "AppData" / "Roaming" / "uv" / "tools" / "paper-distill-mcp" / "Lib" / "site-packages",
@@ -653,6 +653,26 @@ async def read_paper(
     except Exception as exc:
         result["download_error"] = str(exc)
         result["success"] = False
+
+    # Springer OA fallback (if DOI provided and main download failed)
+    if not result.get("success") and doi:
+        try:
+            oa_url = await springer_resolve_oa(doi)
+            if oa_url:
+                import httpx as _httpx
+                async with _httpx.AsyncClient(follow_redirects=True) as _client:
+                    resp = await _client.get(oa_url, timeout=30.0)
+                    if resp.status_code == 200 and "pdf" in resp.headers.get("content-type", "") or resp.content[:5] == b"%PDF-":
+                        from pathlib import Path as _P
+                        out_dir = _P(save_path)
+                        out_dir.mkdir(parents=True, exist_ok=True)
+                        out_file = out_dir / f"{paper_id.replace('/', '_')}.pdf"
+                        out_file.write_bytes(resp.content)
+                        result["download_path"] = str(out_file)
+                        result["success"] = True
+                        result["springer_oa_url"] = oa_url
+        except Exception:
+            pass
 
     return result
 

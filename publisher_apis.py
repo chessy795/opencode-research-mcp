@@ -17,6 +17,7 @@ import httpx
 
 SCOPUS_BASE = "https://api.elsevier.com/content/search/scopus"
 SPRINGER_BASE = "https://api.springernature.com/metadata/json"
+SPRINGER_OA_BASE = "https://api.springernature.com/openaccess/json"
 
 
 # ---------------------------------------------------------------------------
@@ -245,3 +246,43 @@ async def search_springer(
 
     records = data.get("records", []) if isinstance(data, dict) else []
     return [_normalize_springer(r) for r in records[:max_results]]
+
+
+# ---------------------------------------------------------------------------
+# Springer Open Access (resolve DOI → OA PDF link)
+# ---------------------------------------------------------------------------
+
+async def springer_resolve_oa(doi: str) -> str | None:
+    """Resolve a DOI to an OA PDF URL via Springer Nature Open Access API.
+
+    Returns the PDF URL if found, None otherwise.
+    """
+    api_key = os.environ.get("SPRINGER_API_KEY", "")
+    if not api_key or not doi:
+        return None
+
+    params: dict[str, Any] = {
+        "q": f"doi:{doi}",
+        "api_key": api_key,
+        "p": 1,
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(SPRINGER_OA_BASE, params=params, timeout=15.0)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception:
+        return None
+
+    records = data.get("records", []) if isinstance(data, dict) else []
+    for rec in records[:1]:
+        urls = rec.get("url", [])
+        if isinstance(urls, list):
+            for u in urls:
+                if isinstance(u, dict) and u.get("@format") == "pdf":
+                    return u.get("value", "")
+        oa_link = rec.get("openaccess", "")
+        if oa_link and oa_link.startswith("http"):
+            return oa_link
+    return None
