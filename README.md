@@ -100,7 +100,33 @@ Most academic MCPs return everything they find. research-mcp **ranks and filters
 | 7 | `extract_sections` | Selective reading (~80% token savings) |
 | 8 | `compare_papers` | Side-by-side comparison |
 
-**Tool surface:** ~400 tokens (vs ~12,000 for 3 separate MCPs)
+## 8 Tools vs 73 Tools From 2 MCPs
+
+research-mcp replaces **two separate MCP servers** (academix: 8 tools + paper-search: 57 tools + paper-distill: 8 tools) with **8 tools**. The tool surface drops from ~12,000 tokens to ~400 tokens.
+
+| research-mcp (8 tools) | Replaces from academix | Replaces from paper-search | What's added |
+|---|---|---|---|
+| **search_literature** | `academic_search_papers` | `search_papers` + all 21 per-source search tools | Relevance scoring, precision weighting, citation walk, noise filtering, dedup |
+| **paper_lookup** | `academic_get_paper_details` | `search_unpaywall` | Auto-detects DOI/arXiv/title, cross-source |
+| **walk_citations** | `academic_get_citations` + `academic_get_citation_network` + `academic_get_related_papers` | — | Forward + backward, multi-hop |
+| **author_literature** | `academic_search_author` | — | — |
+| **export_references** | `academic_get_bibtex` | — | RIS/CSV/JSON/BibTeX |
+| **read_paper** | — | 19 per-source download tools | Sci-Hub fallback |
+| **extract_sections** | — | — | Selects only needed sections (~80% token savings) |
+| **compare_papers** | — | — | Side-by-side across method/finding/limitation |
+
+**Replaced entirely (no longer needed):**
+
+| Replaced tools | Count |
+|---------------|-------|
+| Per-source search tools (search_arxiv, search_pubmed, ...) | 21 |
+| Per-source download tools (download_arxiv, download_bibmix, ...) | 19 |
+| Per-source read tools (read_arxiv, read_pubmed, ...) | 18 |
+| paper-distill tools | 8 |
+| academix cache/utility tools | 3 |
+| **Total eliminated** | **69** |
+
+**Tool surface:** ~400 tokens (vs ~12,000 for 2 separate MCPs)
 
 ## 8 Sources
 
