@@ -298,7 +298,7 @@ def _merge_papers(items: list[dict[str, Any]], limit: int, query: str | None = N
     return ranked[:limit]
 
 
-BEST_SOURCES = "arxiv,semantic,openalex,crossref,pubmed,unpaywall,openaire,europepmc"
+BEST_SOURCES = "arxiv,semantic,crossref,pubmed,unpaywall,openaire,europepmc"
 
 
 def _expand_query(query: str) -> list[str]:
@@ -459,7 +459,9 @@ async def search_literature(
         if backend == 0:
             data = _json_load(out)
             for paper in data.get("papers", []) if isinstance(data, dict) else []:
-                papers.append(_normalize_paper(paper, "academix"))
+                p = _normalize_paper(paper, "academix")
+                p["source_hits"] = max(_to_int(p.get("source_hits")), 2)  # Boost: OpenAlex ranking is proven
+                papers.append(p)
         elif backend == 1:
             data = _json_load(out)
             for paper in data.get("papers", []) if isinstance(data, dict) else []:
