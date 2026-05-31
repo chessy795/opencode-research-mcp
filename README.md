@@ -1,8 +1,8 @@
 # research-mcp
 
-A precision-optimised MCP server that unifies 8 academic sources into 8 curated tools with **relevance scoring, citation-weighted ranking, and source precision weighting** — designed for PhD-level literature search in applied linguistics, AI in education, and second language writing research.
+A precision-optimised MCP server that unifies 8 academic sources into 8 curated tools with **relevance scoring, citation-weighted ranking, and source precision weighting** — designed for rigorous literature search across academic domains.
 
-Benchmarked across **30 runs (10 queries × 3 MCPs)** against standalone `academix` and `paper-search-mcp` using real proposal queries (LLM feedback accuracy, feedback literacy, DeBERTa classification, hybrid AI-human feedback, spaced micro-learning).
+Benchmarked across **30 runs (10 queries × 3 MCPs)** against standalone `academix` and `paper-search-mcp` using real academic queries.
 
 ## Benchmark: V4 (10 Queries, 30 Runs — 2026-05-31)
 
@@ -50,7 +50,7 @@ The raw search pipeline is the same library calls. The output is ranked, scored,
 
 **Verdict:** research-mcp wins 7/10 queries with 52.7% precision — nearly 2× academix and 3× paper-search. The `relevance_score` field (0–10 per paper) lets you filter below score 3 to eliminate all pure-noise papers with zero false negatives.
 
-## Why Precision Matters for Proposal Literature Search
+## Why Precision Matters
 
 Most academic MCPs return everything they find. research-mcp **ranks and filters**:
 
