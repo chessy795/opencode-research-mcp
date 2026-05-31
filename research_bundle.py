@@ -661,15 +661,6 @@ async def author_literature(
 
 
 @mcp.tool()
-async def export_bibliography(paper_ids: list[str], use_dblp: bool = True) -> str:
-    """Export BibTeX for DOI, arXiv, OpenAlex, DBLP, or Semantic Scholar paper IDs."""
-    return await academix_server.academic_get_bibtex(
-        paper_ids=",".join(paper_ids),
-        use_dblp=use_dblp,
-    )
-
-
-@mcp.tool()
 async def export_references(
     papers: list[dict[str, Any]],
     format: Literal["ris", "csv", "json", "bibtex"] = "ris",
@@ -726,12 +717,13 @@ async def export_references(
         return json.dumps(papers, indent=2, default=str)
 
     elif format == "bibtex":
-        return await export_bibliography(
-            paper_ids=[
-                p.get("doi") or p.get("arxiv_id") or p.get("paper_id", "")
-                for p in papers
-                if p.get("doi") or p.get("arxiv_id") or p.get("paper_id")
-            ]
+        ids = [
+            p.get("doi") or p.get("arxiv_id") or p.get("paper_id", "")
+            for p in papers
+            if p.get("doi") or p.get("arxiv_id") or p.get("paper_id")
+        ]
+        return await academix_server.academic_get_bibtex(
+            paper_ids=",".join(ids),
         )
 
     return "Unsupported format"
@@ -1289,36 +1281,6 @@ async def compare_papers(
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def curate_research(
-    action: Literal[
-        "rank",
-        "filter_duplicates",
-        "pool_status",
-        "prepare_review",
-        "prepare_summarize",
-        "list_topics",
-    ],
-    papers: list[dict[str, Any]] | None = None,
-    top_n: int = 10,
-    custom_focus: str = "",
-) -> Any:
-    """Paper Distill curation utilities for ranking, duplicate filtering, pool status, and review prompts."""
-    if action == "rank":
-        return paper_distill.rank_papers(papers or [], top_n=top_n)
-    if action == "filter_duplicates":
-        return paper_distill.filter_duplicates(papers or [])
-    if action == "pool_status":
-        return paper_distill.pool_status()
-    if action == "prepare_review":
-        return paper_distill.prepare_review()
-    if action == "prepare_summarize":
-        return paper_distill.prepare_summarize(custom_focus=custom_focus)
-    if action == "list_topics":
-        return paper_distill.manage_topics(action="list")
-    raise ValueError(f"Unsupported action: {action}")
-
-
-@mcp.tool()
 async def paper_distill_pipeline(
     action: Literal[
         "setup",
@@ -1329,13 +1291,25 @@ async def paper_distill_pipeline(
         "refresh_pool",
         "finalize_review",
         "collect",
+        "rank",
+        "filter_duplicates",
+        "pool_status",
+        "prepare_review",
+        "prepare_summarize",
+        "list_topics",
     ],
+    papers: list[dict[str, Any]] | None = None,
+    top_n: int = 10,
+    custom_focus: str = "",
     payload: dict[str, Any] | None = None,
 ) -> Any:
-    """Progressive access to Paper Distill workflow actions.
+    """Paper Distill curation and workflow actions.
 
-    Use only when managing a recurring paper-review/distillation workflow, Zotero collection,
-    topic preferences, or push digests. For ordinary search, use search_literature instead.
+    Curation: rank, filter_duplicates, pool_status, prepare_review, prepare_summarize, list_topics
+    Workflow: setup, init_session, load_context, add_topic, configure, refresh_pool, finalize_review, collect
+
+    Use only when managing paper collections or distillation workflows.
+    For ordinary search, use search_literature instead.
     """
     payload = payload or {}
     if action == "setup":
@@ -1354,6 +1328,18 @@ async def paper_distill_pipeline(
         return paper_distill.finalize_review(**payload)
     if action == "collect":
         return paper_distill.collect(**payload)
+    if action == "rank":
+        return paper_distill.rank_papers(papers or [], top_n=top_n)
+    if action == "filter_duplicates":
+        return paper_distill.filter_duplicates(papers or [])
+    if action == "pool_status":
+        return paper_distill.pool_status()
+    if action == "prepare_review":
+        return paper_distill.prepare_review()
+    if action == "prepare_summarize":
+        return paper_distill.prepare_summarize(custom_focus=custom_focus)
+    if action == "list_topics":
+        return paper_distill.manage_topics(action="list")
     raise ValueError(f"Unsupported action: {action}")
 
 
