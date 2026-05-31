@@ -253,9 +253,15 @@ def _merge_papers(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any
         existing["citation_count"] = max(
             _to_int(existing.get("citation_count")), _to_int(item.get("citation_count"))
         )
+    # Rank by: source_hits (most important), has_abstract, year recency, then citation as tiebreaker
     ranked = sorted(
         merged.values(),
-        key=lambda p: (_to_int(p.get("source_hits")), _to_int(p.get("citation_count")), _to_int(p.get("year"))),
+        key=lambda p: (
+            _to_int(p.get("source_hits")),
+            1 if p.get("abstract") else 0,
+            _to_int(p.get("year")),
+            min(_to_int(p.get("citation_count")), 5000),  # cap citations to prevent dominance
+        ),
         reverse=True,
     )
     return ranked[:limit]
@@ -385,21 +391,27 @@ async def search_literature(
                 year=year,
             ),
         ])
+        # Add publisher APIs when keys are set
+        if os.environ.get("ELSEVIER_API_KEY"):
+            tasks.append(search_scopus(q, max_results=max_results, year_from=str(year_from) if year_from else None, year_to=str(year_to) if year_to else None))
+        if os.environ.get("SPRINGER_API_KEY"):
+            tasks.append(search_springer(q, max_results=max_results, year_from=str(year_from) if year_from else None, year_to=str(year_to) if year_to else None))
 
     # Use gather without wait_for to salvage partial results on timeout
     outputs = await asyncio.gather(*tasks, return_exceptions=True)
 
     papers: list[dict[str, Any]] = []
     errors: dict[str, str] = {}
+    num_backends = 2 + bool(os.environ.get("ELSEVIER_API_KEY")) + bool(os.environ.get("SPRINGER_API_KEY"))
 
     for i, out in enumerate(outputs):
-        q_idx = i // 2
-        backend = i % 2
+        q_idx = i // num_backends
+        backend = i % num_backends
         q_label = queries[q_idx] if q_idx < len(queries) else query
 
         if isinstance(out, Exception):
-            backend_name = ["academix", "paper_search"][backend]
-            errors[f"{backend_name}_{q_label}"] = str(out)
+            backend_names = ["academix", "paper-search", "scopus", "springer"]
+            errors[f"{backend_names[backend]}_{q_label}"] = str(out)
             continue
 
         if backend == 0:
@@ -410,6 +422,12 @@ async def search_literature(
             data = _json_load(out)
             for paper in data.get("papers", []) if isinstance(data, dict) else []:
                 papers.append(_normalize_paper(paper, "paper-search"))
+        elif backend == 2:
+            for paper in (out or []) if isinstance(out, list) else []:
+                papers.append(_normalize_paper(paper, "scopus"))
+        elif backend == 3:
+            for paper in (out or []) if isinstance(out, list) else []:
+                papers.append(_normalize_paper(paper, "springer"))
 
     merged = _merge_papers(papers, max_results)
 
