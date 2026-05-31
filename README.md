@@ -1,36 +1,35 @@
 # research-mcp
 
-A bundled MCP server that unifies 8 academic sources into 8 curated tools for LLM research agents. Benchmarked against standalone `academix` (7 tools) and `paper-search-mcp` (52 tools).
+A bundled MCP server that unifies 8 academic sources into 8 curated tools for LLM research agents. Benchmarked across 30 runs (10 queries × 3 MCPs) against standalone `academix` and `paper-search-mcp`.
 
-## Benchmark Results
+## Benchmark (30 Runs, 10 Queries)
 
-Tested across 6 queries (L2 writing research) on all 3 MCPs as real MCP tools:
-
-| Metric | research-mcp (8 tools) | academix (7 tools) | paper-search (52 tools) |
+| Metric | research-mcp (8 tools) | academix (8 tools) | paper-search (57 tools) |
 |--------|----------------------|-------------------|------------------------|
-| **Precision** | **48%** | 40% | 31% |
-| **Efficiency** | **0.38 rel/k-char** | 0.23 | 0.21 |
-| **Abstract coverage** | **100%** | 85% | 72% |
-| **Unique papers** | ~58 | ~55 | ~80 |
-| **Recall** | 29 | 24 | 30 |
-| **Token cost** | **~77k** | ~105k | ~140k |
+| **Avg relevant/query** | **10.7** | 6.4 | 14.8 |
+| **Precision** | **71%** | 43% | 38% |
+| **Wins (10 queries)** | **5** (4 outright + 1 tie) | 0 | 5 |
+| **Abstract coverage** | **100%** | 90% | 80% |
+| **Token efficiency (standard)** | 0.71 rel/1K tok | **1.28 rel/1K tok** | 0.30 |
+| **Token efficiency (compact)** | **1.4 rel/1K tok** | 1.28 rel/1K tok | 0.30 |
+| **Errors** | 0% | 0% | 70% of queries |
 
-**Verdict:** The bundled MCP wins on precision (48%) and efficiency (0.38 rel/k-char) — 2x more relevant papers per token than standalone MCPs.
+**Verdict:** research-mcp wins 5/10 queries with highest precision (71%). With `compact=True`, it also beats academix on token efficiency (1.4 vs 1.28). Paper-search wins on raw volume but carries a 57-tool surface and 70% error rate.
 
 ## 8 Tools
 
-| # | Tool | Purpose | ~Tokens |
-|---|------|---------|---------|
-| 1 | `search_literature` | 8 sources, dedup, auto citation walk | ~100 |
-| 2 | `paper_lookup` | DOI/arXiv/title → metadata (auto-detect) | ~50 |
-| 3 | `walk_citations` | Multi-hop citation chain walker | ~30 |
-| 4 | `author_literature` | Search by author | ~15 |
-| 5 | `export_references` | RIS/CSV/JSON/BibTeX export | ~40 |
-| 6 | `read_paper` | Full text + Sci-Hub fallback | ~50 |
-| 7 | `extract_sections` | Selective reading (~80% token savings) | ~50 |
-| 8 | `compare_papers` | Side-by-side comparison | ~40 |
+| # | Tool | Purpose |
+|---|------|---------|
+| 1 | `search_literature` | 8 sources, dedup, auto citation walk, **compact mode** |
+| 2 | `paper_lookup` | DOI/arXiv/title → metadata (auto-detect) |
+| 3 | `walk_citations` | Multi-hop citation chain (S2 + OpenAlex) |
+| 4 | `author_literature` | Search by author |
+| 5 | `export_references` | RIS/CSV/JSON/BibTeX export |
+| 6 | `read_paper` | Full text + Sci-Hub fallback |
+| 7 | `extract_sections` | Selective reading (~80% token savings) |
+| 8 | `compare_papers` | Side-by-side comparison |
 
-**Total: ~375 tokens** (vs ~12,000 for 3 separate MCPs)
+**Tool surface:** ~400 tokens (vs ~12,000 for 3 separate MCPs)
 
 ## 8 Sources
 
@@ -41,9 +40,17 @@ Tested across 6 queries (L2 writing research) on all 3 MCPs as real MCP tools:
 | OpenAlex | 270M+ publications | No |
 | CrossRef | DOI resolution | No |
 | PubMed | Biomedical | No |
-| Unpaywall | OA PDF resolver | Email (use institutional) |
-| Scopus | 26K+ journals | Yes (Elsevier API key) |
-| Springer Nature | 29M+ papers | Yes (Springer API key) |
+| Unpaywall | OA PDF resolver | Email recommended |
+| Scopus | 26K+ journals | Elsevier API key |
+| Springer Nature | 29M+ papers | Springer API key |
+
+## Key Features
+
+- **Compact mode** — `search_literature(compact=True)` strips abstracts, saves ~50% tokens
+- **OpenAlex citation walk** — free, no rate limits (unlike Semantic Scholar)
+- **No year filter by default** — includes seminal papers (1990-2017), not just recent
+- **Auto dedup** — papers from multiple sources merged automatically
+- **Source filtering** — excludes noisy sources (bioRxiv, medRxiv) by default
 
 ## Setup
 
@@ -53,7 +60,7 @@ cd research-mcp
 pip install -e .
 ```
 
-### opencode config
+### opencode Config
 
 ```json
 {
@@ -72,43 +79,41 @@ pip install -e .
 }
 ```
 
-### API Key Setup
+### API Keys
 
-| Key | Where | What It Enables |
-|-----|-------|----------------|
-| Semantic Scholar | [api.semanticscholar.org](https://api.semanticscholar.org/) | 10 req/sec (vs 1/sec) |
-| Unpaywall | Your institutional email | OA PDF resolution via PolyU |
+| Key | Source | What It Enables |
+|-----|--------|----------------|
+| Semantic Scholar | [api.semanticscholar.org](https://api.semanticscholar.org/) | 10 req/sec (vs 1/sec shared) |
+| Unpaywall | Your institutional email | OA PDF resolution |
 | Elsevier/Scopus | [dev.elsevier.com](https://dev.elsevier.com/) | Scopus search (26K+ journals) |
 | Springer Nature | [dev.springernature.com](https://dev.springernature.com/) | Springer search + OA PDF |
 
 ## Usage
 
 ```python
-# Search (auto-citation walk + query expansion)
-search_literature(query="online writing L2 research", max_results=10)
+# Search (8 sources, auto cite-walk). Use compact=True to save tokens.
+search_literature(query="online writing L2 research", max_results=15)
+search_literature(query="online writing L2 research", compact=True)
 
-# Lookup paper by DOI or title
+# Lookup by DOI or title
 paper_lookup(query="10.1016/j.asw.2018.02.004")
 
 # Read specific sections (saves ~80% tokens)
-extract_sections(paper_id="10.1016/j.asw.2018.02.004", sections=["abstract", "methods", "conclusions"])
+extract_sections(paper_id="10.1016/j.asw.2018.02.004", sections=["abstract", "methods"])
 
-# Export to RIS/CSV/JSON/BibTeX
+# Export (RIS/CSV/JSON/BibTeX)
 export_references(papers=[...], format="ris")
 
-# Compare papers
-compare_papers(papers=[...], aspects=["method", "finding", "limitation"])
-
-# Walk citation chains
+# Walk citations (uses both Semantic Scholar + OpenAlex)
 walk_citations(paper_id="10.1016/j.asw.2018.02.004", direction="forward", depth=2)
 ```
 
 ## Research Basis
 
 - [Wang et al. 2026](https://arxiv.org/abs/2602.18914) — MCP description quality (+260% selection)
-- [Dunkel 2026](https://arxiv.org/abs/2605.05247) — Progressive tool disclosure
-- [Hou et al. 2026](https://arxiv.org/abs/2504.14947) — MCP security landscape
-- [Gan & Sun 2025](https://arxiv.org/abs/2505.03275) — RAG-MCP tool routing
+- [Dunkel 2026](https://arxiv.org/abs/2605.05247) — DADL: context window grows linearly with tool catalog
+- [Hou et al. 2026](https://arxiv.org/abs/2504.14947) — MCP security landscape (16 threat scenarios)
+- [Gan & Sun 2025](https://arxiv.org/abs/2505.03275) — RAG-MCP: tool routing for agent systems
 
 ## License
 
