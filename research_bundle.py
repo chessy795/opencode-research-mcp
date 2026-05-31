@@ -20,19 +20,9 @@ from typing import Any, Literal
 
 from publisher_apis import search_scopus, search_springer, springer_resolve_oa
 
-TOOL_SITE_PACKAGES = [
-    Path.home() / "AppData" / "Roaming" / "uv" / "tools" / "paper-distill-mcp" / "Lib" / "site-packages",
-    Path.home() / "AppData" / "Roaming" / "uv" / "tools" / "paper-search-mcp" / "Lib" / "site-packages",
-    Path.home() / "AppData" / "Roaming" / "uv" / "tools" / "academix" / "Lib" / "site-packages",
-]
-
-for site_packages in reversed(TOOL_SITE_PACKAGES):
-    site_path = str(site_packages)
-    if site_packages.exists() and site_path not in sys.path:
-        sys.path.insert(0, site_path)
-
 from fastmcp import FastMCP  # noqa: E402
 
+# academix and paper-search installed system-wide or via uv
 from academix.aggregator import AcademicAggregator  # noqa: E402
 from academix import server as academix_server  # noqa: E402
 from paper_search_mcp import server as paper_search  # noqa: E402
