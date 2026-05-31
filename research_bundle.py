@@ -267,7 +267,7 @@ def _merge_papers(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any
     return ranked[:limit]
 
 
-BEST_SOURCES = "arxiv,semantic,openalex,crossref,pubmed,unpaywall,core,europepmc,openaire"
+BEST_SOURCES = "arxiv,semantic,openalex,crossref,pubmed,unpaywall,openaire"
 
 
 def _expand_query(query: str) -> list[str]:
