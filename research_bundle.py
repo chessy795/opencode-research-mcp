@@ -389,7 +389,7 @@ async def search_literature(
             ),
             paper_search.search_papers(
                 query=q,
-                max_results_per_source=max(5, min(max_results * 2, 50)),
+                max_results_per_source=max(5, min(max_results, 20)),
                 sources=BEST_SOURCES,
                 year=year,
             ),
