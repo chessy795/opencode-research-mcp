@@ -6,7 +6,7 @@ A research plugin that improves on the two best existing academic search plugins
 
 **Why it's better:** The existing plugins return 15 papers but only ~4 are on-topic — the rest is noise from biomedical sources like PubMed (papers that happen to mention "feedback" in a clinical context) or bioRxiv (neuroscience preprints sharing a keyword). research-mcp filters those out before ranking, so ~8 of 15 papers are actually useful. That's **53% precision vs 27% (academix) and 16% (paper-search)**.
 
-**Token savings:** It replaces 65 tools from two plugins with 8 tools. The agent spends ~400 tokens browsing tools instead of ~12,000 — most of its context budget goes to research instead of navigating tool menus.
+**Token savings:** It replaces 65 tools from two plugins with 8 tools. The agent spends ~400 tokens browsing tools instead of ~12,000 — most of its context budget goes to research instead of navigating tool menus. This design is grounded in research showing tool catalog size inversely correlates with selection accuracy (Wang et al. 2026) and context window grows linearly with tool count (Dunkel 2026).
 
 Benchmarked across **30 runs (10 queries × 3 MCPs)** against standalone `academix` and `paper-search-mcp`.
 
