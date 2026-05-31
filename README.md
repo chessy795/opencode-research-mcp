@@ -12,10 +12,26 @@ Benchmarked across **30 runs (10 queries × 3 MCPs)** against standalone `academ
 | **Precision** | **52.7%** | 26.7% | 15.8% |
 | **Wins (10 queries)** | **7** | 2 | 1 |
 | **relevance_score** | **0–10 per paper** | — | — |
-| **Source precision weights** | **Yes** (openaire+2, scopus+2, springer+2, arxiv+1, semantic+1) | — | — |
-| **Citation-weighted ranking** | **Yes** (citation_count above year) | Citation-only | — |
-| **Citation walk** | **Forward + backward** (10 per walk) | — | — |
-| **Errors** | 0 | 0 | **100% yes** (Zenodo crashes every query) |
+| **Source precision weights** | **Yes** | — | — |
+| **Citation-weighted ranking** | **Yes** | Native (OpenAlex sort) | — |
+| **Citation walk** | **Forward + backward** | Forward only | — |
+| **Multi-factor ranking** | **Yes** | Citation × keyword only | Flat list |
+| **Noise filtering** | **Yes** | None | None |
+| **Errors** | 0 | 0 | **100%** (Zenodo crashes every query) |
+
+**What MCP3 adds to MCP1 + MCP2:**
+
+research-mcp wraps the same underlying source libraries as academix (OpenAlex) and paper-search (21 academic sources). The wrapping is not the contribution. The contribution is what happens **after** the raw results come back:
+
+1. **relevance_score per paper** — title term overlap + citation boost (1–3 points for 50+/100+/500+ cites). Neither MCP1 nor MCP2 provides this.
+2. **Multi-factor ranking** — source_hits → relevance_score → abstract → citation_count → year. MCP1 sorts by OpenAlex's proprietary relevance×citation blend. MCP2 returns a flat list.
+3. **Source precision weighting** — openaire+2, scopus+2, springer+2, academix+1, arxiv+1, semantic+1. High-precision sources rank higher automatically. Neither MCP1 nor MCP2 does this.
+4. **Backward citation walk** — walks references (what papers cite) in addition to forward (who cites them). MCP1 and MCP2 only walk forward.
+5. **Walk most-cited papers** — citation walk targets highly-cited papers, not just top-ranked. Surfaces seminal works (Ellis 2005, Kormos 2012) through their references.
+6. **relevance_score ≥3 filter** — removes papers with zero query term match and <50 citations. Zero false negatives across 150 benchmarked papers. Neither MCP1 nor MCP2 has any filter.
+7. **Noise source exclusion** — bioRxiv (0% precision), medRxiv (0%), PubMed (~30%), Europe PMC (~17%), Zenodo (crashes) excluded by default. MCP2 includes all 21 sources equally.
+
+The raw search pipeline is the same library calls. The output is ranked, scored, and filtered.
 
 ### Per-Query Wins
 
