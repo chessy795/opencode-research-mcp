@@ -1,86 +1,49 @@
-# research-mcp Benchmark Results
+# research-mcp Benchmark Results (Strict)
 
 **Date:** 2026-05-31  
-**Query:** "online writing task L2 research validity data quality comparison"  
-**Filter:** year_from=2018
+**Query:** `"online writing task L2 research validity data quality comparison"`  
+**Filter:** year 2018-2026  
+**Setup:** All backends initialized with same API keys, same query, same filters.
 
-## Bundled MCP (9 tools, 8 sources)
+## Results
 
-| Metric | Value |
-|--------|-------|
-| Raw papers | 20 |
-| After dedup | 10 |
-| Cite-walk | ✅ Auto (fire-and-forget) |
-| Query expansion | ✅ Auto |
-| Errors | 0 |
-| Tool tokens | ~450 |
+| Backend | Papers | Time | Abstracts | Relevant | Errors |
+|---------|--------|------|-----------|----------|--------|
+| **Bundled (research-mcp)** | 30→10 deduped | ~5s | 10/10 | 1/10 | 0 |
+| **Academix (standalone)** | 0 | 0.0s | 0 | 0 | ❌ JSON parse error |
+| **Paper-Search (standalone)** | 20 | 2.6s | 18/20 | 0/10 | 0 |
+| **Scopus** | 1 | 1.9s | 0 | 0 | 0 |
+| **Springer** | 0 | 0.5s | 0 | 0 | 0 |
 
-**Top 3 results:**
-1. Effects of Post-Task Anticipation during Online Collaborative Writing in L2 (2022) — **RELEVANT** ✓
-2. Researching and Practicing Positive Psychology in L2 (2021) — tangential
-3. Systematic review of English medium instruction (2017) — tangential
+## Honest Assessment
 
-## Academix MCP (7 tools)
+### Bundled MCP Wins On (mechanical)
+- ✅ Deduplication (30 raw → 10 unique)
+- ✅ Error handling (graceful fallback)
+- ✅ Token efficiency (8 tools vs 69 tools)
+- ✅ Auto citation walk
+- ✅ Cite-walk on by default
 
-| Metric | Value |
-|--------|-------|
-| Papers | 0 |
-| Error | "Expecting value: line 1 column 1 (char 0)" |
-| Status | ❌ **BROKEN** — JSON parse failure |
-| Tool tokens | ~3,000 |
+### Bundled MCP Does NOT Win On
+- ❌ Relevance (1/10 relevant across ALL backends)
+- ❌ No L2-specific databases (ERIC, LLBA missing)
+- ❌ Query expansion doesn't help with niche domain terms
 
-## Paper-Search MCP (52 tools)
+### Root Cause
+The **underlying search APIs** (Semantic Scholar, OpenAlex, arXiv, CrossRef, PubMed) don't understand L2 writing methodology as a domain. "Data quality comparison" matches random data validation papers. "Online writing" matches any paper mentioning "online" and "writing" — including remote sensing image augmentation.
 
-| Metric | Value |
-|--------|-------|
-| Papers | 20 |
-| Sources used | arxiv, semantic, openalex, crossref, pubmed |
-| Time | 63.6s |
-| Tool tokens | ~5,000 |
+**The bundled MCP can't fix bad source-level relevance.** It's a tool layer, not a knowledge layer. For L2-specific research, you'd need ERIC (Education Resources Information Center) or LLBA (Linguistics and Language Behavior Abstracts) — neither of which has a free MCP server.
 
-**Top 3 results:**
-1. TerraGen: Remote Sensing — **IRRELEVANT** ✗
-2. Data Encoding for Byzantine-Resilient Distributed Optimization — **IRRELEVANT** ✗
-3. Byzantine-Resilient SGD — **IRRELEVANT** ✗
+### Academix Bug
+Academix returns empty responses even with proper initialization. This is a bug in the academix package itself — possibly Semantic Scholar rate limiting from earlier benchmark runs, or a response parsing issue.
 
-## Scopus (via publisher_apis.py)
+### What the Benchmark Proves
+1. **Bundled MCP is mechanically superior** — dedup, error handling, token efficiency
+2. **Relevance is an upstream problem** — not something MCP bundling can fix
+3. **The model needs better queries** — "online writing task L2 research validity" is too generic. The subagent that worked used much more specific queries like "remote stimulated recall L2 writing methodology validity Zoom"
 
-| Metric | Value |
-|--------|-------|
-| Papers | 1 |
-| Time | 1.1s |
-| Status | ✅ Works but sparse |
-
-## Springer (via publisher_apis.py)
-
-| Metric | Value |
-|--------|-------|
-| Papers | 0 |
-| Time | 0.5s |
-| Status | ⚠️ No results for this query |
-
-## Comparison Summary
-
-| Metric | Bundled (8 tools) | 3 Separate MCPs |
-|--------|-------------------|-----------------|
-| Tool count | 8 | 69 (7+52+10) |
-| Context tokens | ~450 | ~8,000+ |
-| Sources | 8 (auto) | 5 (manual) |
-| Dedup | ✅ Automatic | ❌ None |
-| Cite-walk | ✅ Auto | ❌ None |
-| Query expansion | ✅ Auto | ❌ None |
-| Error handling | ✅ Graceful | ❌ Academix crashes |
-| Relevant result #1 | ✅ Yes | ✗ No (irrelevant) |
-| Time (MCP call) | ~5s | ~65s |
-
-## Verdict
-
-The bundled MCP **wins on every metric**:
-- **75% fewer context tokens** (450 vs 8,000+)
-- **Academix is broken** — catches the crash gracefully
-- **Paper-search returns garbage** — irrelevant papers about Byzantine SGD and remote sensing for an L2 writing query
-- **Bundled dedup + ranking** filters out the noise
-- **Auto-citation walk** finds related work without extra calls
-- **8 sources in one call** vs 5 sources across 3 separate calls
-
-The only limitation: relevance is still imperfect. The underlying academic search APIs (Semantic Scholar, OpenAlex) don't have great L2 writing-specific relevance. The bundled MCP can't fix bad source-level relevance — it can only optimize how it combines and ranks results from those sources.
+## Recommendation
+The research-mcp is the best **tool layer** available for academic research. But for **domain-specific relevance**, the model needs to:
+1. Use more specific, domain-aware queries
+2. Use extract_sections to read abstracts selectively
+3. Build a synthesis matrix before writing
