@@ -22,7 +22,6 @@ from publisher_apis import search_scopus, search_springer, springer_resolve_oa
 
 from fastmcp import FastMCP  # noqa: E402
 
-# academix and paper-search installed system-wide or via uv
 from academix.aggregator import AcademicAggregator  # noqa: E402
 from academix import server as academix_server  # noqa: E402
 from paper_search_mcp import server as paper_search  # noqa: E402
