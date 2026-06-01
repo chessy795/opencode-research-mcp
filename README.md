@@ -1,12 +1,12 @@
 # research-mcp
 
-A research plugin that improves on the two best existing academic search plugins (academix and paper-search) by adding relevance scoring, citation-weighted ranking, source filtering, and automated citation walking.
+A lean research plugin that bundles academic search, citation graph traversal, and full-text download into 3 tools. Built on OpenAlex, Semantic Scholar, and CrossRef.
 
-**What it does:** You ask a research question, it searches 8 academic databases at once, removes duplicates, ranks results by how well they match your query, and returns the best 15 papers with a relevance score for each. It also automatically finds papers your results cite (and papers that cite them) so you don't miss foundational or follow-up work.
+**What it does:** You ask a research question, it searches 9 academic databases + OpenAlex direct API at once, removes duplicates, ranks results by relevance, and returns the best papers with full metadata (authors, abstracts, citation counts). Citation walk follows the graph forward and backward via OpenAlex to surface landmark studies.
 
-**Why it's better:** The existing plugins return 15 papers but only ~4 are on-topic — the rest is noise from biomedical sources like PubMed (papers that happen to mention "feedback" in a clinical context) or bioRxiv (neuroscience preprints sharing a keyword). research-mcp filters those out before ranking, so ~8 of 15 papers are actually useful. That's **53% precision vs 27% (academix) and 16% (paper-search)**.
+**Why it's better:** Most MCPs return raw results from one source. research-mcp merges results from multiple indexes, scores relevance per paper, and walks citations from the most-cited papers — not just the top-ranked ones. The 3-tool surface costs ~150 tokens vs ~5,200 for two separate MCPs.
 
-**Token savings:** It replaces 65 tools from two plugins with 8 tools. The agent spends ~400 tokens browsing tools instead of ~5,200 — saving ~4,800 tokens per request before a single search happens. In a 16K context window, that's 30% more budget for actual research. Research shows tool routing quality degrades 12% for every 10 tools in the catalog, and bundled servers with <10 tools achieve 89% routing accuracy (Gan & Sun 2025). Catalog size over 40 tools sees -260% selection quality vs under 15 (Wang et al. 2026). And each tool adds ~1.5% context pressure (Dunkel 2026).
+**Token savings:** 3 tools (~150 tokens) replace 65+ tools from academix + paper-search (~5,200 tokens). That's 97% less tool surface overhead.
 
 Benchmarked across **30 runs (10 queries × 3 MCPs)** against standalone `academix` and `paper-search-mcp`.
 

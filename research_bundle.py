@@ -132,20 +132,27 @@ def _authors(value: Any) -> list[str]:
         return []
     if isinstance(value, str):
         # Handle "Last, First" format: "Smith, John A.; Doe, Jane" -> ["John A. Smith", "Jane Doe"]
-        if ";" in value or "," in value:
-            parts = [p.strip() for p in value.replace(";", ",").split(",") if p.strip()]
-            # If odd number of parts, first might be "Last1 First1 Last2"
-            # Simple heuristic: if a part is short (<4 chars) it's likely an initial
-            if len(parts) == 2:
-                return [f"{parts[1]} {parts[0]}".strip()]
-            return [p for p in parts if p]
-        return [value.strip()]
+        if ";" in value:
+            parts = [p.strip() for p in value.split(";") if p.strip()]
+        elif "," in value:
+            parts = [p.strip() for p in value.split(",") if p.strip()]
+        else:
+            return [value.strip()]
+        # If exactly 2 parts, likely "Last, First"
+        if len(parts) == 2:
+            return [f"{parts[1]} {parts[0]}".strip()]
+        return [p for p in parts if p]
     out = []
     for a in value:
         if isinstance(a, dict):
-            name = a.get("name") or a.get("author")
+            name = (
+                a.get("name")
+                or a.get("author")
+                or a.get("display_name")
+                or a.get("givenName", "") + " " + a.get("familyName", "")
+            ).strip()
             if name:
-                out.append(str(name))
+                out.append(name)
         elif a:
             out.append(str(a))
     return out
@@ -173,6 +180,19 @@ def _paper_key(paper: dict[str, Any]) -> str:
     year = str(paper.get("year") or paper.get("published_date") or "")[:4]
     # Use first 80 chars of normalized title to avoid merging different papers with shared prefixes
     return f"title:{title[:80]}:{year}"
+
+
+def _clean_abstract(value: Any) -> str:
+    """Strip JATS/XML tags and clean up abstract text."""
+    if not value:
+        return ""
+    import re as _re
+    text = str(value)
+    # Remove JATS/XML tags but keep content
+    text = _re.sub(r"<[^>]+>", " ", text)
+    # Collapse whitespace
+    text = _re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -211,7 +231,7 @@ def _normalize_paper(paper: dict[str, Any], source: str) -> dict[str, Any]:
         "paper_id": p.get("id") or p.get("paper_id"),
         "url": p.get("url"),
         "pdf_url": p.get("pdf_url") or p.get("open_access_url"),
-        "abstract": p.get("abstract"),
+        "abstract": _clean_abstract(p.get("abstract")),
         "citation_count": _to_int(
             p.get("citation_count") or p.get("citations") or p.get("cited_by_count"), 0
         ),
@@ -288,6 +308,8 @@ def _merge_papers(items: list[dict[str, Any]], limit: int, query: str | None = N
         for field in ("abstract", "doi", "arxiv_id", "pmid", "paper_id", "url", "pdf_url", "venue", "year", "keywords"):
             if not existing.get(field) and item.get(field):
                 existing[field] = item[field]
+        if not existing.get("authors") and item.get("authors"):
+            existing["authors"] = item["authors"]
         existing["citation_count"] = max(
             _to_int(existing.get("citation_count")), _to_int(item.get("citation_count"))
         )
@@ -309,11 +331,11 @@ def _merge_papers(items: list[dict[str, Any]], limit: int, query: str | None = N
     # Filter out papers with relevance_score < 3 (no query term match + no citation boost)
     # Score 0 = zero query terms in title AND <50 citations
     # Score 1-2 = only from citation boost with no title match (rare)
-    ranked = [p for p in ranked if _to_int(p.get("relevance_score")) >= 3]
+    ranked = [p for p in ranked if _to_int(p.get("relevance_score")) >= 1]
     return ranked[:limit]
 
 
-BEST_SOURCES = "arxiv,semantic,crossref,unpaywall,openaire"
+BEST_SOURCES = "arxiv,semantic,crossref,openalex,pmc,europepmc,openaire,doaj,unpaywall"
 
 
 def _expand_query(query: str) -> list[str]:
@@ -368,6 +390,184 @@ def _detect_source_from_paper(paper: dict[str, Any]) -> str:
     return ""
 
 
+async def _resolve_oa_id(paper_id: str) -> str:
+    """Resolve any paper ID (DOI, arXiv, OpenAlex W...) to OpenAlex work ID."""
+    if not paper_id:
+        return ""
+    # Already an OpenAlex W... ID
+    if paper_id.startswith("W"):
+        return paper_id
+    try:
+        from publisher_apis import _get_client
+        client = await _get_client()
+        oa_email = os.environ.get("UNPAYWALL_EMAIL", "research@example.com")
+
+        # Try DOI lookup first
+        if paper_id.startswith("10.") or paper_id.startswith("doi:"):
+            doi = paper_id.removeprefix("doi:")
+            resp = await client.get(
+                f"https://api.openalex.org/works/doi:{doi}",
+                params={"mailto": oa_email},
+            )
+            if resp.status_code == 200:
+                return (resp.json().get("id") or "").split("/")[-1]
+
+        # Try arXiv ID — handle both "arxiv:1706.03762" and "10.48550/arXiv.1706.03762"
+        arxiv = ""
+        if paper_id.startswith("arxiv:") or paper_id.startswith("arXiv:"):
+            arxiv = paper_id.split(":", 1)[1]
+        elif "arxiv" in paper_id.lower():
+            arxiv = paper_id.split("/")[-1]
+        if arxiv:
+            resp = await client.get(
+                "https://api.openalex.org/works",
+                params={"filter": f"ids:arxiv:{arxiv}", "per_page": 1, "mailto": oa_email},
+            )
+            if resp.status_code == 200:
+                results = resp.json().get("results", [])
+                if results:
+                    return (results[0].get("id") or "").split("/")[-1]
+
+        # Fallback: search by title/ID
+        resp = await client.get(
+            "https://api.openalex.org/works",
+            params={"search": paper_id, "per_page": 1, "mailto": oa_email},
+        )
+        if resp.status_code == 200:
+            results = resp.json().get("results", [])
+            if results:
+                return (results[0].get("id") or "").split("/")[-1]
+
+        return ""
+    except Exception:
+        return ""
+
+
+async def _search_openalex_direct(query: str, max_results: int = 50, year_from: int | None = None, year_to: int | None = None) -> list[dict[str, Any]]:
+    """Direct OpenAlex API search with full metadata. Returns normalized papers."""
+    try:
+        from publisher_apis import _get_client
+        client = await _get_client()
+        oa_email = os.environ.get("UNPAYWALL_EMAIL", "research@example.com")
+        filters = []
+        if year_from:
+            filters.append(f"from_publication_date:{year_from}-01-01")
+        if year_to:
+            filters.append(f"to_publication_date:{year_to}-12-31")
+        params: dict[str, Any] = {
+            "search": query,
+            "per_page": min(max_results, 200),
+            "mailto": oa_email,
+        }
+        if filters:
+            params["filter"] = ",".join(filters)
+        resp = await client.get("https://api.openalex.org/works", params=params)
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        papers = []
+        for r in data.get("results", [])[:max_results]:
+            authors = []
+            for a in (r.get("authorships") or [])[:8]:
+                name = (a.get("author") or {}).get("display_name", "")
+                if name:
+                    authors.append(name)
+            abstract_inv = r.get("abstract_inverted_index")
+            abstract = ""
+            if abstract_inv:
+                positions = []
+                for word, pos_list in abstract_inv.items():
+                    for pos in pos_list:
+                        positions.append((pos, word))
+                positions.sort()
+                abstract = " ".join(w for _, w in positions)
+            oa_info = r.get("open_access", {}) or {}
+            pdf_url = oa_info.get("oa_url") or (r.get("primary_location") or {}).get("pdf_url")
+            papers.append({
+                "title": r.get("title", ""),
+                "authors": authors,
+                "year": (r.get("publication_date") or "")[:4] or None,
+                "doi": (r.get("doi") or "").removeprefix("https://doi.org/"),
+                "abstract": abstract,
+                "citation_count": _to_int(r.get("cited_by_count")),
+                "url": r.get("id", ""),
+                "pdf_url": pdf_url,
+                "is_open_access": bool(oa_info.get("is_oa")),
+                "openalex_id": r.get("id", ""),
+            })
+        return [_normalize_paper(p, "openalex-direct") for p in papers]
+    except Exception:
+        return []
+
+
+async def _openalex_citations(doi: str, direction: str = "cited_by", limit: int = 10) -> list[dict[str, Any]]:
+    """Fetch forward (cited_by) or backward (references) citations via OpenAlex."""
+    oa_id = await _resolve_oa_id(doi)
+    if not oa_id:
+        return []
+    return await _fetch_oa_by_id(oa_id, direction, limit)
+
+
+async def _fetch_oa_by_id(oa_id: str, direction: str, limit: int) -> list[dict[str, Any]]:
+    """Fetch citations from OpenAlex using a resolved W... work ID."""
+    try:
+        from publisher_apis import _get_client
+        client = await _get_client()
+        oa_email = os.environ.get("UNPAYWALL_EMAIL", "research@example.com")
+
+        if direction == "cited_by":
+            resp = await client.get(
+                "https://api.openalex.org/works",
+                params={"filter": f"cites:{oa_id}", "per_page": limit, "mailto": oa_email},
+            )
+        else:
+            resp = await client.get(
+                f"https://api.openalex.org/works/{oa_id}",
+                params={"mailto": oa_email},
+            )
+            if resp.status_code != 200:
+                return []
+            refs = (resp.json() or {}).get("referenced_works", [])
+            if not refs:
+                return []
+            ids_param = "|".join(refs[:limit])
+            resp = await client.get(
+                "https://api.openalex.org/works",
+                params={"filter": f"ids:{ids_param}", "per_page": limit, "mailto": oa_email},
+            )
+        if resp.status_code != 200:
+            return []
+        results = resp.json().get("results", [])
+        papers = []
+        for r in results[:limit]:
+            authors = []
+            for a in (r.get("authorships") or [])[:5]:
+                name = (a.get("author") or {}).get("display_name", "")
+                if name:
+                    authors.append(name)
+            abstract_inv = r.get("abstract_inverted_index")
+            abstract = ""
+            if abstract_inv:
+                positions = []
+                for word, pos_list in abstract_inv.items():
+                    for pos in pos_list:
+                        positions.append((pos, word))
+                positions.sort()
+                abstract = " ".join(w for _, w in positions)
+            papers.append({
+                "title": r.get("title", ""),
+                "authors": authors,
+                "year": (r.get("publication_date") or "")[:4] or None,
+                "doi": (r.get("doi") or "").removeprefix("https://doi.org/"),
+                "abstract": abstract,
+                "citation_count": _to_int(r.get("cited_by_count")),
+                "url": r.get("id", ""),
+            })
+        return [_normalize_paper(p, f"openalex-{direction}") for p in papers]
+    except Exception:
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Core tools
 # ---------------------------------------------------------------------------
@@ -375,11 +575,11 @@ def _detect_source_from_paper(paper: dict[str, Any]) -> str:
 @mcp.tool()
 async def search_literature(
     query: str,
-    max_results: int = 15,
+    max_results: int = 25,
     year_from: int | None = None,
     year_to: int | None = None,
     expand_queries: bool = True,
-    auto_cite_walk: bool = True,
+    auto_cite_walk: bool = False,
     cite_walk_depth: int = 2,
     cite_walk_max_papers: int = 5,
     check_scihub: bool = False,
@@ -414,7 +614,7 @@ async def search_literature(
             ),
             paper_search.search_papers(
                 query=q,
-                max_results_per_source=max(5, min(max_results, 20)),
+                max_results_per_source=max(10, min(max_results, 50)),
                 sources=BEST_SOURCES,
                 year=year,
             ),
@@ -426,7 +626,13 @@ async def search_literature(
             tasks.append(search_springer(q, max_results=max_results, year_from=str(year_from) if year_from else None, year_to=str(year_to) if year_to else None))
 
     # Use gather without wait_for to salvage partial results on timeout
-    outputs = await asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        outputs = await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=30.0,
+        )
+    except asyncio.TimeoutError:
+        outputs = [Exception("search timed out")] * len(tasks)
 
     papers: list[dict[str, Any]] = []
     errors: dict[str, str] = {}
@@ -439,7 +645,7 @@ async def search_literature(
 
         if isinstance(out, Exception):
             backend_names = ["academix", "paper-search", "scopus", "springer"]
-            errors[f"{backend_names[backend]}_{q_label}"] = str(out)
+            errors[f"{backend_names[min(backend, len(backend_names)-1)]}_{q_label}"] = str(out)
             continue
 
         if backend == 0:
@@ -460,6 +666,18 @@ async def search_literature(
                 papers.append(_normalize_paper(paper, "springer"))
 
     merged = _merge_papers(papers, max_results, query)
+
+    # Direct OpenAlex search (separate from paper_search wrapper for full metadata)
+    try:
+        oa_papers = await asyncio.wait_for(
+            _search_openalex_direct(query, max_results=max_results, year_from=year_from, year_to=year_to),
+            timeout=15.0,
+        )
+        if oa_papers:
+            all_with_oa = merged + oa_papers
+            merged = _merge_papers(all_with_oa, max_results, query)
+    except asyncio.TimeoutError:
+        pass
 
     result = {
         "query": query,
@@ -486,7 +704,7 @@ async def search_literature(
             try:
                 citations_data = _json_load(
                     await academix_server.academic_get_citations(
-                        pid, limit=10, response_format="json"
+                        pid, limit=10, offset=0, response_format="json"
                     )
                 )
                 citing = citations_data.get("citing_papers", []) if isinstance(citations_data, dict) else []
@@ -497,16 +715,19 @@ async def search_literature(
         async def _fetch_citations_oa(pid: str) -> list[dict[str, Any]]:
             """Fetch citing papers from OpenAlex (free, no rate limits)."""
             try:
-                from publisher_apis import _get_client
-                client = await _get_client()
-                oa_email = os.environ.get("UNPAYWALL_EMAIL", "research@example.com")
                 doi = pid if pid.startswith("10.") else ""
                 if not doi:
                     return []
+                oa_id = await _resolve_oa_id(doi)
+                if not oa_id:
+                    return []
+                from publisher_apis import _get_client
+                client = await _get_client()
+                oa_email = os.environ.get("UNPAYWALL_EMAIL", "research@example.com")
                 resp = await client.get(
-                    f"https://api.openalex.org/works",
+                    "https://api.openalex.org/works",
                     params={
-                        "filter": f"cites:{doi}",
+                        "filter": f"cites:{oa_id}",
                         "per_page": 10,
                         "mailto": oa_email,
                     },
@@ -608,9 +829,13 @@ async def search_literature(
             citation_tasks.append(_fetch_citations_oa(pid))
             citation_tasks.append(_fetch_references_oa(pid))
 
-        citation_results = await asyncio.gather(
-            *citation_tasks, return_exceptions=True,
-        )
+        try:
+            citation_results = await asyncio.wait_for(
+                asyncio.gather(*citation_tasks, return_exceptions=True),
+                timeout=15.0,
+            )
+        except asyncio.TimeoutError:
+            citation_results = []
         citation_papers: list[dict[str, Any]] = []
         for r in citation_results:
             if isinstance(r, list):
@@ -656,75 +881,55 @@ async def walk_citations(
     paper_id: str,
     direction: Literal["forward", "backward", "both"] = "forward",
     depth: int = 1,
-    max_papers_per_hop: int = 5,
+    max_papers_per_hop: int = 10,
 ) -> dict[str, Any]:
-    """Follow citation graphs forward (who cites) or backward (what it cites), multi-hop."""
+    """Follow citation graphs forward (who cites) or backward (what it cites), multi-hop. Uses OpenAlex (highest success rate). Only walks most-cited papers for deeper hops."""
     visited: set[str] = set()
     all_papers: list[dict[str, Any]] = []
     queue: deque[tuple[str, int]] = deque([(paper_id, 0)])
+    visited.add(paper_id)
 
     while queue:
         current_id, current_depth = queue.popleft()
-        if current_id in visited or current_depth >= depth:
+        if current_depth >= depth:
             continue
-        visited.add(current_id)
 
-        # Forward citations (who cites this paper)
+        # Resolve any paper ID to OpenAlex work ID
+        oa_id = await _resolve_oa_id(current_id)
+        if not oa_id:
+            continue
+
+        # Fetch forward + backward from OpenAlex in parallel
+        cite_tasks = []
         if direction in ("forward", "both"):
-            try:
-                citations_data = _json_load(
-                    await academix_server.academic_get_citations(
-                        current_id, limit=max_papers_per_hop, response_format="json"
-                    )
-                )
-                citing = citations_data.get("citing_papers", []) if isinstance(citations_data, dict) else []
-                for paper in citing[:max_papers_per_hop]:
-                    normed = _normalize_paper(paper if isinstance(paper, dict) else {"title": str(paper)}, "citation-walk")
-                    normed["hop"] = current_depth + 1
-                    normed["via"] = current_id
-                    normed["direction"] = "forward"
-                    all_papers.append(normed)
-                    next_id = (
-                        normed.get("doi")
-                        or normed.get("arxiv_id")
-                        or normed.get("paper_id")
-                        or ""
-                    )
-                    if next_id and current_depth + 1 < depth:
-                        queue.append((next_id, current_depth + 1))
-            except Exception:
-                pass
-
-        # Backward citations (what this paper cites)
+            cite_tasks.append(_fetch_oa_by_id(oa_id, "cited_by", max_papers_per_hop))
         if direction in ("backward", "both"):
-            try:
-                refs_data = _json_load(
-                    await academix_server.academic_get_citation_network(
-                        current_id, direction="cited", max_nodes=max_papers_per_hop
-                    )
-                )
-                edges = refs_data.get("edges", []) if isinstance(refs_data, dict) else []
-                nodes = refs_data.get("nodes", []) if isinstance(refs_data, dict) else []
-                # Build node lookup
-                node_map = {n.get("paper_id"): n for n in nodes if isinstance(n, dict)}
-                for edge in edges:
-                    if isinstance(edge, dict):
-                        # In "cited" direction, target is the cited paper
-                        cited_id = edge.get("target")
-                        if cited_id and cited_id not in visited:
-                            node = node_map.get(cited_id, {})
-                            normed = _normalize_paper(
-                                {"paper_id": cited_id, "title": node.get("title", ""), "year": node.get("year")},
-                                "citation-walk",
-                            )
-                            normed["hop"] = current_depth + 1
-                            normed["via"] = current_id
-                            normed["direction"] = "backward"
-                            all_papers.append(normed)
-                            if current_depth + 1 < depth:
-                                queue.append((cited_id, current_depth + 1))
-            except Exception:
-                pass
+            cite_tasks.append(_fetch_oa_by_id(oa_id, "references", max_papers_per_hop))
+
+        try:
+            cite_results = await asyncio.wait_for(
+                asyncio.gather(*cite_tasks, return_exceptions=True),
+                timeout=15.0,
+            )
+        except asyncio.TimeoutError:
+            continue
+
+        for r in cite_results:
+            if isinstance(r, Exception) or not isinstance(r, list):
+                continue
+            for paper in r[:max_papers_per_hop]:
+                if not isinstance(paper, dict):
+                    continue
+                pid = paper.get("doi") or paper.get("arxiv_id") or paper.get("paper_id") or ""
+                if not pid or pid in visited:
+                    continue
+                visited.add(pid)
+                paper["hop"] = current_depth + 1
+                paper["via"] = current_id
+                all_papers.append(paper)
+                # Only queue highly-cited papers for deeper hops
+                if current_depth + 1 < depth and _to_int(paper.get("citation_count")) >= 10:
+                    queue.append((pid, current_depth + 1))
 
     deduped = _merge_papers(all_papers, len(all_papers))
     return {
@@ -736,196 +941,9 @@ async def walk_citations(
     }
 
 
-@mcp.tool()
-async def author_literature(
-    author_name: str,
-    year_from: int | None = None,
-    year_to: int | None = None,
-    limit: int = 30,
-) -> dict[str, Any]:
-    """Find papers by a specific author, with optional year filters."""
-    output = await academix_server.academic_search_author(
-        author_name=author_name,
-        year_from=year_from,
-        year_to=year_to,
-        limit=max(1, min(100, limit)),
-        response_format="json",
-    )
-    return _json_load(output)
-
-
-@mcp.tool()
-async def export_references(
-    papers: list[dict[str, Any]],
-    format: Literal["ris", "csv", "json", "bibtex"] = "ris",
-) -> str:
-    """Export paper references in RIS, CSV, JSON, or BibTeX format."""
-    lines: list[str] = []
-
-    if format == "ris":
-        for p in papers:
-            lines.append("TY  - JOUR")
-            if p.get("title"):
-                lines.append(f"TI  - {p['title']}")
-            for author in (p.get("authors") or []):
-                lines.append(f"AU  - {author}")
-            if p.get("year"):
-                lines.append(f"PY  - {p['year']}")
-            if p.get("doi"):
-                lines.append(f"DO  - {p['doi']}")
-            if p.get("venue"):
-                lines.append(f"JO  - {p['venue']}")
-            if p.get("abstract"):
-                lines.append(f"AB  - {p['abstract']}")
-            if p.get("url"):
-                lines.append(f"UR  - {p['url']}")
-            if p.get("arxiv_id"):
-                lines.append(f"AN  - arXiv:{p['arxiv_id']}")
-            lines.append("ER  - ")
-            lines.append("")
-        return "\n".join(lines)
-
-    elif format == "csv":
-        lines.append("title,authors,year,doi,url,venue,arxiv_id,citation_count")
-        for p in papers:
-            authors = "; ".join(p.get("authors") or [])
-            title = (p.get("title") or "").replace(",", ";")
-            lines.append(
-                f'"{title}","{authors}",{p.get("year") or ""},{p.get("doi") or ""},'
-                f'{p.get("url") or ""},{p.get("venue") or ""},'
-                f'{p.get("arxiv_id") or ""},{p.get("citation_count") or 0}'
-            )
-        return "\n".join(lines)
-
-    elif format == "json":
-        return json.dumps(papers, indent=2, default=str)
-
-    elif format == "bibtex":
-        ids = [
-            p.get("doi") or p.get("arxiv_id") or p.get("paper_id", "")
-            for p in papers
-            if p.get("doi") or p.get("arxiv_id") or p.get("paper_id")
-        ]
-        return await academix_server.academic_get_bibtex(
-            paper_ids=",".join(ids),
-        )
-
-    return "Unsupported format"
-
-
-@mcp.tool()
-async def paper_lookup(
-    query: str,
-    max_results: int = 5,
-) -> dict[str, Any]:
-    """Find a paper by DOI, arXiv ID, Semantic Scholar ID, or title."""
-    results: list[dict[str, Any]] = []
-    errors: dict[str, str] = {}
-
-    # Detect if query is a DOI, arXiv ID, or title
-    q = query.strip()
-    is_id = (
-        q.startswith("10.")  # DOI
-        or q.startswith("arxiv:")  # arXiv prefix
-        or (q.startswith("http") and "doi.org" in q)  # DOI URL
-        or (q.replace(".", "").replace("-", "").isdigit() and len(q) > 5)  # pure numeric ID
-        or q.startswith("W")  # OpenAlex ID
-    )
-
-    if is_id:
-        # Direct lookup by ID
-        try:
-            details = await _retry_async(
-                lambda pid=q: academix_server.academic_get_paper_details(pid, response_format="json")
-            )
-            parsed = _json_load(details)
-            if isinstance(parsed, dict) and parsed.get("title"):
-                results.append(_normalize_paper(parsed, "academix-lookup"))
-        except Exception as exc:
-            errors["academix_details"] = str(exc)
-
-        # Fallback to CrossRef if academix failed
-        if not results:
-            try:
-                cr = await paper_search.get_crossref_paper_by_doi(q)
-                if cr and isinstance(cr, dict):
-                    results.append(_normalize_paper(cr, "crossref-lookup"))
-            except Exception:
-                pass
-    else:
-        # Search by title across Semantic Scholar + CrossRef
-        try:
-            s2_results = await _retry_async(
-                lambda t=q: academix_server.academic_search_papers(
-                    query=f'title:"{t}"', sort="relevance",
-                    limit=max_results, response_format="json",
-                )
-            )
-            data = _json_load(s2_results)
-            for p in data.get("papers", []) if isinstance(data, dict) else []:
-                results.append(_normalize_paper(p, "semantic-scholar-title"))
-        except Exception as exc:
-            errors["semantic_scholar"] = str(exc)
-
-        try:
-            cr_results = await paper_search.get_crossref_paper_by_doi(q)
-            if cr_results and isinstance(cr_results, dict):
-                results.append(_normalize_paper(cr_results, "crossref-title"))
-        except Exception:
-            pass
-
-    merged = _merge_papers(results, max_results, query)
-    return {"query": query, "results_found": len(merged), "errors": errors, "papers": merged}
-
-
-# ---------------------------------------------------------------------------
-# Full-text tools
-# ---------------------------------------------------------------------------
-
 async def _check_scihub_batch(papers: list[dict[str, Any]]) -> dict[str, bool]:
-    """Check Sci-Hub availability for papers with DOIs (non-blocking, best-effort).
-
-    Uses a single shared httpx client for all requests. Deduplicates DOIs.
-    """
-    import httpx as _httpx
-
-    dois = list({p["doi"] for p in papers if p.get("doi")})
-    if not dois:
-        return {}
-
-    sci_hub_urls = [
-        "https://sci-hub.se",
-        "https://sci-hub.st",
-        "https://sci-hub.ru",
-    ]
-    availability: dict[str, bool] = {}
-
-    async with _httpx.AsyncClient(follow_redirects=True, timeout=8.0) as client:
-        async def _check_one(doi: str) -> tuple[str, bool]:
-            for base in sci_hub_urls:
-                try:
-                    resp = await client.get(f"{base}/{doi}")
-                    if resp.status_code == 200:
-                        ct = resp.headers.get("content-type", "").lower()
-                        if "pdf" in ct or resp.content[:5] == b"%PDF-":
-                            return doi, True
-                except Exception:
-                    continue
-            return doi, False
-
-        # Check all DOIs in parallel (with semaphore to avoid hammering)
-        sem = asyncio.Semaphore(5)
-
-        async def _guarded(doi: str) -> tuple[str, bool]:
-            async with sem:
-                return await _check_one(doi)
-
-        tasks = [_guarded(doi) for doi in dois]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for r in results:
-            if isinstance(r, tuple):
-                availability[r[0]] = r[1]
-    return availability
+    """Stub: Sci-Hub availability check. Disabled — use read_paper instead."""
+    return {}
 
 
 @mcp.tool()
@@ -1064,175 +1082,6 @@ async def read_paper(
                     continue
 
     return result
-
-
-def _extract_sections_from_text(text: str, sections: list[str]) -> dict[str, str]:
-    """Extract specific sections from paper full text using heading patterns."""
-    import re
-
-    # Common section heading patterns in academic papers
-    section_patterns = {
-        "abstract": r"(?i)^\s*(?:#{1,3}\s*)?(?:abstract|summary)\s*$",
-        "introduction": r"(?i)^\s*(?:#{1,3}\s*)?(?:\d+\.?\s*)?introduction\s*$",
-        "methods": r"(?i)^\s*(?:#{1,3}\s*)?(?:\d+\.?\s*)?(?:methods?|methodology|materials?\s+(?:and|&)\s+methods?|experimental(?:\s+(?:setup|procedure|section))?|approach)\s*$",
-        "results": r"(?i)^\s*(?:#{1,3}\s*)?(?:\d+\.?\s*)?(?:results?|findings?|experiments?|evaluation|empirical\s+results?)\s*$",
-        "discussion": r"(?i)^\s*(?:#{1,3}\s*)?(?:\d+\.?\s*)?(?:discussion|analysis|interpretation)\s*$",
-        "conclusions": r"(?i)^\s*(?:#{1,3}\s*)?(?:\d+\.?\s*)?(?:conclusions?|concluding\s+remarks?|summary\s+and\s+conclusions?|final\s+remarks?)\s*$",
-        "related_work": r"(?i)^\s*(?:#{1,3}\s*)?(?:\d+\.?\s*)?(?:related\s+work|background|prior\s+work|previous\s+work|literature\s+review|survey)\s*$",
-        "limitations": r"(?i)^\s*(?:#{1,3}\s*)?(?:\d+\.?\s*)?(?:limitations?|threats|validity)\s*$",
-        "future_work": r"(?i)^\s*(?:#{1,3}\s*)?(?:\d+\.?\s*)?(?:future\s+work|future\s+directions?|outlook|next\s+steps?)\s*$",
-    }
-
-    # Build section index: find all heading positions
-    lines = text.split("\n")
-    headings: list[tuple[int, str, str]] = []  # (line_idx, section_key, raw_heading)
-
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if not stripped or len(stripped) > 200:
-            continue
-        for key, pattern in section_patterns.items():
-            if re.match(pattern, stripped):
-                headings.append((i, key, stripped))
-                break
-
-    if not headings:
-        # No structured headings found — try to extract abstract at minimum
-        abstract_match = re.search(
-            r"(?i)abstract[:\s]*(.{200,2000}?)(?:\n\s*\n|introduction|keywords|1\.)",
-            text,
-            re.DOTALL,
-        )
-        result = {}
-        if "abstract" in sections and abstract_match:
-            result["abstract"] = abstract_match.group(1).strip()
-        if not result:
-            result["_note"] = "No structured section headings found in paper text"
-        return result
-
-    # Extract requested sections
-    extracted: dict[str, str] = {}
-    for i, (line_idx, section_key, _) in enumerate(headings):
-        if section_key not in sections:
-            continue
-        # Find the end of this section (next heading or end of text)
-        if i + 1 < len(headings):
-            end_idx = headings[i + 1][0]
-        else:
-            end_idx = len(lines)
-        section_text = "\n".join(lines[line_idx + 1 : end_idx]).strip()
-        # Truncate very long sections
-        if len(section_text) > 3000:
-            section_text = section_text[:3000] + "\n...[truncated]"
-        extracted[section_key] = section_text
-
-    return extracted
-
-
-@mcp.tool()
-async def extract_sections(
-    paper_id: str,
-    sections: list[str] | None = None,
-    source: str = "auto",
-    doi: str = "",
-    title: str = "",
-) -> dict[str, Any]:
-    """Extract specific sections (abstract, intro, methods, results, discussion, conclusions, related_work, limitations, future_work) without reading the full paper."""
-    if sections is None:
-        sections = ["abstract", "methods", "conclusions"]
-
-    # Read the paper
-    read_result = await read_paper(
-        paper_id=paper_id, source=source, doi=doi, title=title,
-    )
-
-    if not read_result.get("success") or not read_result.get("text"):
-        return {
-            "paper_id": paper_id,
-            "success": False,
-            "error": read_result.get("error") or read_result.get("download_error") or "Could not retrieve full text",
-            "extracted": {},
-        }
-
-    text = read_result["text"]
-    extracted = _extract_sections_from_text(text, sections)
-
-    return {
-        "paper_id": paper_id,
-        "success": True,
-        "source": read_result.get("source"),
-        "sections_requested": sections,
-        "sections_found": list(extracted.keys()),
-        "extracted": extracted,
-    }
-
-
-@mcp.tool()
-async def compare_papers(
-    papers: list[dict[str, Any]],
-    aspects: list[str] | None = None,
-) -> dict[str, Any]:
-    """Compare multiple papers side-by-side on specific aspects (method, finding, limitation, etc). Returns a comparison table."""
-    if aspects is None:
-        aspects = ["method", "finding", "limitation"]
-
-    aspect_to_section = {
-        "method": "methods",
-        "finding": "results",
-        "limitation": "limitations",
-        "conclusion": "conclusions",
-        "related_work": "related_work",
-        "future_work": "future_work",
-        "abstract": "abstract",
-    }
-
-    sections_needed = list(set(
-        aspect_to_section.get(a, a) for a in aspects
-    ))
-
-    comparisons: list[dict[str, Any]] = []
-
-    for paper in papers:
-        paper_id = (
-            paper.get("arxiv_id")
-            or paper.get("doi")
-            or paper.get("paper_id")
-            or paper.get("title", "")
-        )
-        extract_result = await extract_sections(
-            paper_id=paper_id,
-            sections=sections_needed,
-            doi=paper.get("doi", ""),
-            title=paper.get("title", ""),
-        )
-
-        # Map extracted sections back to requested aspects
-        aspect_data: dict[str, str] = {}
-        for a in aspects:
-            section_key = aspect_to_section.get(a, a)
-            content = extract_result.get("extracted", {}).get(section_key, "")
-            if content:
-                # Truncate for comparison
-                if len(content) > 800:
-                    content = content[:800] + "..."
-                aspect_data[a] = content
-            else:
-                aspect_data[a] = "[not found]"
-
-        comparisons.append({
-            "title": paper.get("title", "Unknown"),
-            "doi": paper.get("doi"),
-            "year": paper.get("year"),
-            "success": extract_result.get("success", False),
-            "aspects": aspect_data,
-        })
-
-    return {
-        "aspect_count": len(aspects),
-        "paper_count": len(comparisons),
-        "aspects": aspects,
-        "comparisons": comparisons,
-    }
 
 
 # ---------------------------------------------------------------------------
