@@ -1861,7 +1861,7 @@ async def read_paper(
         })
 
     result: dict[str, Any] = {"paper_id": paper_id, "source": source, "fallbacks_tried": []}
-    overall_deadline = time.monotonic() + 20.0  # hard cap so 5 parallel calls finish in ~20s wall time
+    overall_deadline = time.monotonic() + 35.0  # hard cap so 5 parallel calls finish in ~35s wall time
 
     reader = _get_reader(source)
     if reader:
@@ -1887,7 +1887,7 @@ async def read_paper(
 
     # Try paper_search.download_with_fallback (handles Unpaywall + multiple repositories)
     remaining = max(1.0, overall_deadline - time.monotonic())
-    if remaining > 1.0:
+    if remaining > 0.5:
         try:
             path = await asyncio.wait_for(
                 paper_search.download_with_fallback(
@@ -1930,7 +1930,7 @@ async def read_paper(
         # Try OpenAlex OA URL (has open_access.oa_url for many papers)
         try:
             remaining = max(1.0, overall_deadline - time.monotonic())
-            if remaining > 1.0:
+            if remaining > 0.5:
                 oa_url = None
                 resp = await asyncio.wait_for(
                     client.get(
@@ -1972,7 +1972,7 @@ async def read_paper(
         # Try Springer OA
         try:
             remaining = max(1.0, overall_deadline - time.monotonic())
-            if remaining > 1.0:
+            if remaining > 0.5:
                 oa_url = await asyncio.wait_for(
                     springer_resolve_oa(doi),
                     timeout=remaining,
