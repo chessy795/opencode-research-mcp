@@ -2,3 +2,4 @@ academix
 paper-search-mcp
 paper-distill-mcp
 fastmcp
+fastembed  # optional; graceful fallback if missing (semantic relevance)

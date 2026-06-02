@@ -34,6 +34,7 @@ from paper_search_mcp import server as paper_search  # noqa: E402
 ARXIV_ID_RE = re.compile(r"^\d{4}\.\d{4,5}(v\d+)?$")
 DOI_RE = re.compile(r"^10\.\d{4,}/\S+$")
 PMID_RE = re.compile(r"^PMID:\d+$|^\d{4,9}$")
+SURVEY_RE = re.compile(r"\b(review|survey|meta[- ]analysis|systematic review|umbrella review|scoping review)\b", re.IGNORECASE)
 
 # Shared config
 UNPAYWALL_EMAIL = os.environ.get("UNPAYWALL_EMAIL", "research@example.com")
@@ -185,6 +186,144 @@ def _safe_filename(value: str) -> str:
     return s
 
 
+def _compact_authors(authors: list[str], max_shown: int = 5) -> list[str]:
+    """Keep first N authors; append a marker showing the total count."""
+    if not authors or len(authors) <= max_shown:
+        return list(authors or [])
+    return list(authors[:max_shown]) + [f"et al. ({len(authors)} total)"]
+
+
+def _compress_venue(name: str) -> str:
+    """Strip publisher suffixes and conference proceedings clutter."""
+    if not name:
+        return ""
+    n = str(name).strip()
+    # Split on common publisher separators; keep the part that looks like a venue name
+    for sep in (" - ", " : ", ", "):
+        if sep in n:
+            parts = [p.strip() for p in n.split(sep)]
+            # Drop trailing parts that look like publisher suffixes
+            while len(parts) > 1 and re.search(
+                r"\b(press|publish|inc|ltd|corp|group|society|wiley|elsevier|springer|ieee|acm|taylor)\b",
+                parts[-1], re.IGNORECASE,
+            ):
+                parts.pop()
+            if len(parts) < len(n.split(sep)):
+                n = " ".join(parts) if sep == " - " else parts[0]
+                break
+    # Strip common prefixes that bloat names
+    n = re.sub(r"^(proceedings of the |proc\.? of the |the journal of )", "", n, flags=re.IGNORECASE)
+    return n[:120]  # hard cap
+
+
+# ---------------------------------------------------------------------------
+# Semantic relevance (BAAI/bge-small-en-v1.5 via fastembed, ONNX, no torch)
+# ---------------------------------------------------------------------------
+
+_embedder = None
+_embed_cache: OrderedDict[str, tuple[float, list[float]]] = OrderedDict()  # text -> (ts, vec)
+_EMBED_CACHE_MAX = 4096
+_EMBED_CACHE_TTL = 86400  # 1 day; embeddings are stable
+
+
+def _get_embedder():
+    """Lazy-load the bge-small embedder. Returns None if fastembed isn't available."""
+    global _embedder
+    if _embedder is None:
+        try:
+            from fastembed import TextEmbedding
+            _embedder = TextEmbedding("BAAI/bge-small-en-v1.5")
+        except Exception:
+            _embedder = False  # sentinel: unavailable
+    return _embedder if _embedder else None
+
+
+def _cached_embed(text: str) -> list[float] | None:
+    """Embed text with TTL+LRU cache. Returns None if embedder unavailable."""
+    model = _get_embedder()
+    if model is None or not text:
+        return None
+    k = hashlib.md5(text.encode("utf-8")).hexdigest()
+    entry = _embed_cache.get(k)
+    if entry and time.monotonic() - entry[0] < _EMBED_CACHE_TTL:
+        _embed_cache.move_to_end(k)
+        return entry[1]
+    try:
+        # bge uses a query prefix for asymmetric retrieval
+        vec = next(model.embed([f"Represent this sentence for searching relevant passages: {text}"])).tolist()
+    except Exception:
+        return None
+    _embed_cache[k] = (time.monotonic(), vec)
+    if len(_embed_cache) > _EMBED_CACHE_MAX:
+        _embed_cache.popitem(last=False)
+    return vec
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    """Compute cosine similarity between two vectors."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(x * x for x in b) ** 0.5
+    return dot / (na * nb) if na and nb else 0.0
+
+
+def _passage_text(paper: dict[str, Any]) -> str:
+    """Build a passage string for embedding: title + abstract (truncated)."""
+    title = (paper.get("title") or "").strip()
+    abstract = (paper.get("abstract") or "").strip()[:1500]
+    return f"{title}. {abstract}".strip() if title or abstract else ""
+
+
+# ---------------------------------------------------------------------------
+# Author reputation (Semantic Scholar h-index cache, no extra latency on hit)
+# ---------------------------------------------------------------------------
+
+_author_hindex: dict[str, int] = {}  # author name -> h-index; 0 = unknown / not found
+_S2_API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
+
+
+async def _lookup_author_hindex(name: str) -> int:
+    """Look up h-index for a single author via S2. Returns 0 on failure."""
+    if not name or not _S2_API_KEY:
+        return 0
+    if name in _author_hindex:
+        return _author_hindex[name]
+    try:
+        client = await _get_client()
+        # S2 author search; first match by name
+        resp = await client.get(
+            "https://api.semanticscholar.org/graph/v1/author/search",
+            params={"query": name, "limit": 1, "fields": "hIndex"},
+            headers={"x-api-key": _S2_API_KEY},
+        )
+        if resp.status_code != 200:
+            _author_hindex[name] = 0
+            return 0
+        data = resp.json()
+        results = data.get("data") or []
+        h = int(results[0].get("hIndex") or 0) if results else 0
+    except Exception:
+        h = 0
+    _author_hindex[name] = h
+    return h
+
+
+async def _boost_authors(papers: list[dict[str, Any]]) -> None:
+    """Fetch h-index for first author of each paper in parallel; mutates papers with 'first_author_h'."""
+    names = list({(p.get("authors") or [""])[0] for p in papers if p.get("authors")})
+    if not names:
+        return
+    results = await asyncio.gather(
+        *(_lookup_author_hindex(n) for n in names), return_exceptions=True
+    )
+    h_map = {n: (r if isinstance(r, int) else 0) for n, r in zip(names, results)}
+    for p in papers:
+        first = (p.get("authors") or [""])[0]
+        p["first_author_h"] = h_map.get(first, 0)
+
+
 def _save_pdf(content: bytes, paper_id: str, save_path: str) -> str:
     """Write PDF content to disk and return the path."""
     out_dir = Path(save_path)
@@ -242,7 +381,8 @@ def _normalize_paper(paper: dict[str, Any], source: str) -> dict[str, Any]:
         for k, v in raw.items():
             if k not in p or p[k] is None:
                 p[k] = v
-    authors = _authors(p.get("authors"))
+    all_authors = _authors(p.get("authors"))
+    compact_authors = _compact_authors(all_authors)
     year_raw = p.get("year") or str(p.get("published_date") or "")[:4]
     # Detect OA status: explicit flag, or has pdf_url, or from OA sources
     is_oa = (
@@ -253,11 +393,14 @@ def _normalize_paper(paper: dict[str, Any], source: str) -> dict[str, Any]:
         or "biorxiv" in str(p.get("doi") or "")
         or "medrxiv" in str(p.get("doi") or "")
     )
+    sources = sorted(set(s for s in [source, str(p.get("source") or source)] if s))
+    title = p.get("title") or ""
     return {
-        "title": p.get("title"),
-        "authors": authors,
+        "title": title,
+        "authors": compact_authors,
+        "author_count": len(all_authors),
         "year": _to_int(year_raw, 0) or None,
-        "venue": p.get("venue") or p.get("journal") or p.get("publisher"),
+        "venue": _compress_venue(p.get("venue") or p.get("journal") or p.get("publisher")),
         "doi": p.get("doi"),
         "arxiv_id": p.get("arxiv_id") or p.get("arxiv"),
         "pmid": p.get("pmid"),
@@ -270,7 +413,9 @@ def _normalize_paper(paper: dict[str, Any], source: str) -> dict[str, Any]:
         ),
         "keywords": p.get("keywords") or p.get("categories"),
         "is_open_access": bool(is_oa),
-        "sources": sorted(set(s for s in [source, str(p.get("source") or source)] if s)),
+        "is_survey": bool(SURVEY_RE.search(title or "")),
+        "sources": sources,
+        "source_count": len(sources),
     }
 
 
@@ -288,17 +433,40 @@ SOURCE_PRECISION_BONUS = {
 }
 
 
-def _merge_papers(items: list[dict[str, Any]], limit: int, query: str | None = None) -> list[dict[str, Any]]:
-    """Deduplicate and rank papers. Adds relevance_score when query is provided.
+def _merge_papers(
+    items: list[dict[str, Any]],
+    limit: int,
+    query: str | None = None,
+    mode: str = "comprehensive",
+) -> list[dict[str, Any]]:
+    """Deduplicate, score, and rank papers.
 
-    relevance_score = term overlap between query and title (0-10 scale)
-    + citation boost (1-3 points for 50+/100+/500+ citations).
+    Relevance score (0-10) = 0.7 * semantic (cosine via bge-small) + 0.3 * keyword_overlap
+                            + citation boost (0-3) + survey boost (+1) + author boost (0-1)
+    Mode filters/reranks the result set:
+      - "seminal":        sort by citation_count desc, year asc; require >=10 citations
+      - "recent":         keep last 2 years; sort by citation_count desc
+      - "survey":         keep review/survey/meta-analysis papers only
+      - "comprehensive":  default behavior
     """
-    # Extract query terms for relevance scoring
+    # Mode-specific filter (apply before scoring to skip wasted work)
+    if mode == "survey":
+        items = [p for p in items if p.get("is_survey")]
+    elif mode == "recent":
+        from datetime import datetime
+        cutoff = datetime.now().year - 2
+        items = [p for p in items if (_to_int(p.get("year")) or 0) >= cutoff]
+    elif mode == "seminal":
+        items = [p for p in items if _to_int(p.get("citation_count")) >= 10]
+
+    # Extract query terms for keyword scoring
     query_terms: set[str] = set()
     if query:
         q_clean = re.sub(r"[^\w\s]", "", query.casefold())
         query_terms = {w for w in q_clean.split() if len(w) > 2}
+
+    # Pre-compute query embedding once (None if embedder unavailable)
+    q_vec = _cached_embed(query) if query else None
 
     merged: dict[str, dict[str, Any]] = {}
     for item in items:
@@ -312,20 +480,35 @@ def _merge_papers(items: list[dict[str, Any]], limit: int, query: str | None = N
             for s in (item.get("sources") or []):
                 precision_boost = max(precision_boost, SOURCE_PRECISION_BONUS.get(s, 0))
             item["source_hits"] = raw_hits + precision_boost
-            # Compute relevance score from title term overlap + citation boost
-            score = 0
+
+            # Relevance scoring: blend semantic + keyword
+            keyword_score = 0.0
             if query_terms and item.get("title"):
                 title_clean = re.sub(r"[^\w\s]", "", item["title"].casefold())
                 title_terms = set(title_clean.split())
-                overlap = len(title_terms & query_terms)
-                score = min(overlap * 3, 10)
-            # Boost papers with high citation counts (top 10% of cited works get +3)
+                keyword_score = min(len(title_terms & query_terms) * 3.0 / 10.0, 1.0)
+            sem_score = 0.0
+            if q_vec is not None:
+                p_vec = _cached_embed(_passage_text(item))
+                if p_vec:
+                    sem_score = max(_cosine(q_vec, p_vec), 0.0)
+            base = 0.7 * sem_score + 0.3 * keyword_score  # 0..1
+            score = int(round(base * 10))  # 0..10
+
+            # Citation boost
             cites = _to_int(item.get("citation_count"))
             if cites >= 500:
                 score = min(score + 3, 10)
             elif cites >= 100:
                 score = min(score + 2, 10)
             elif cites >= 50:
+                score = min(score + 1, 10)
+            # Survey boost
+            if item.get("is_survey"):
+                score = min(score + 1, 10)
+            # Author reputation boost
+            h = _to_int(item.get("first_author_h"))
+            if h >= 50:
                 score = min(score + 1, 10)
             item["relevance_score"] = score
             merged[key] = item
@@ -342,31 +525,63 @@ def _merge_papers(items: list[dict[str, Any]], limit: int, query: str | None = N
                 existing[field] = item[field]
         if not existing.get("authors") and item.get("authors"):
             existing["authors"] = item["authors"]
+        if not existing.get("is_survey") and item.get("is_survey"):
+            existing["is_survey"] = True
         existing["citation_count"] = max(
             _to_int(existing.get("citation_count")), _to_int(item.get("citation_count"))
         )
-        # Take max of existing and new relevance_score (sources may differ in their scoring)
         existing["relevance_score"] = max(
             _to_int(existing.get("relevance_score")),
             _to_int(item.get("relevance_score")),
         )
-    # Rank by: source_hits, relevance_score, has_abstract, citation_count, then year as tiebreaker
-    ranked = sorted(
-        merged.values(),
-        key=lambda p: (
-            _to_int(p.get("source_hits")),
-            _to_int(p.get("relevance_score")),
-            1 if p.get("abstract") else 0,
+        existing["first_author_h"] = max(
+            _to_int(existing.get("first_author_h")),
+            _to_int(item.get("first_author_h")),
+        )
+
+    # Mode-specific ranking
+    if mode == "seminal":
+        # citations desc, then oldest year first
+        sort_key = lambda p: (
             min(_to_int(p.get("citation_count")), 5000),
-            _to_int(p.get("year")),
-        ),
-        reverse=True,
-    )
+            -(_to_int(p.get("year")) or 9999),
+        )
+        ranked = sorted(merged.values(), key=sort_key, reverse=True)
+    elif mode == "recent":
+        # citations desc, then newest year first
+        sort_key = lambda p: (
+            min(_to_int(p.get("citation_count")), 5000),
+            _to_int(p.get("year")) or 0,
+        )
+        ranked = sorted(merged.values(), key=sort_key, reverse=True)
+    elif mode == "survey":
+        # relevance desc, surveys first, then citations desc
+        sort_key = lambda p: (
+            _to_int(p.get("relevance_score")),
+            1 if p.get("is_survey") else 0,
+            min(_to_int(p.get("citation_count")), 5000),
+        )
+        ranked = sorted(merged.values(), key=sort_key, reverse=True)
+    else:  # comprehensive
+        ranked = sorted(
+            merged.values(),
+            key=lambda p: (
+                _to_int(p.get("source_hits")),
+                _to_int(p.get("relevance_score")),
+                1 if p.get("abstract") else 0,
+                min(_to_int(p.get("citation_count")), 5000),
+                _to_int(p.get("year")),
+            ),
+            reverse=True,
+        )
+
+    # Quality filter (always on): drop papers with no abstract AND <5 citations
+    ranked = [p for p in ranked if p.get("abstract") or _to_int(p.get("citation_count")) >= 5]
+
     # Only apply relevance-score floor when a query is given (walk_citations passes None)
-    if query is not None:
-        # Score 0 = zero query terms in title AND <50 citations (unrelated)
-        # Score 1-2 = only from citation boost (rare but keep)
+    if query is not None and mode == "comprehensive":
         ranked = [p for p in ranked if _to_int(p.get("relevance_score")) >= 1]
+
     return ranked[:limit]
 
 
@@ -592,10 +807,18 @@ async def search_literature(
     year_from: int | None = None,
     year_to: int | None = None,
     expand_queries: bool = True,
+    mode: Literal["seminal", "recent", "survey", "comprehensive"] = "comprehensive",
 ) -> dict[str, Any]:
-    """Search academic papers across 8 sources (arXiv, Semantic Scholar, OpenAlex, CrossRef, Unpaywall, OpenAIRE, Scopus, Springer). Returns deduplicated results with abstracts and citation counts."""
-    # Check cache
-    cache_key = (query, max_results, year_from, year_to, expand_queries)
+    """Search academic papers across 8 sources (arXiv, Semantic Scholar, OpenAlex, CrossRef, Unpaywall, OpenAIRE, Scopus, Springer). Returns deduplicated, semantically ranked results with abstracts and citation counts.
+
+    mode:
+      - "seminal":       highly-cited foundational works (citations desc, oldest first)
+      - "recent":        last 2 years, ranked by citations
+      - "survey":        review/survey/meta-analysis papers only
+      - "comprehensive": default breadth-first search
+    """
+    # Check cache (mode is part of the key)
+    cache_key = (query, max_results, year_from, year_to, expand_queries, mode)
     cached = _search_cache.get(*cache_key)
     if cached is not None:
         return cached
@@ -660,7 +883,13 @@ async def search_literature(
         else:
             papers.extend(_extract_papers(out, source))
 
-    merged = _merge_papers(papers, max_results, query)
+    # Author reputation boost (parallel, cached, non-blocking on failure)
+    try:
+        await asyncio.wait_for(_boost_authors(papers), timeout=2.0)
+    except asyncio.TimeoutError:
+        pass
+
+    merged = _merge_papers(papers, max_results, query, mode=mode)
 
     # Direct OpenAlex search (separate from paper_search wrapper for full metadata)
     try:
@@ -669,13 +898,15 @@ async def search_literature(
             timeout=15.0,
         )
         if oa_papers:
+            await asyncio.wait_for(_boost_authors(oa_papers), timeout=2.0)
             all_with_oa = merged + oa_papers
-            merged = _merge_papers(all_with_oa, max_results, query)
+            merged = _merge_papers(all_with_oa, max_results, query, mode=mode)
     except asyncio.TimeoutError:
         pass
 
     result = {
         "query": query,
+        "mode": mode,
         "queries_used": queries,
         "total_before_dedupe": len(papers),
         "returned": len(merged),
