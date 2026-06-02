@@ -510,6 +510,130 @@ def _ezproxy_url(target_url: str, ezproxy: str) -> str:
     return f"{ezproxy.rstrip('/')}/login?url={quote(target_url, safe='')}"
 
 
+_browser_download_lock = asyncio.Lock()
+_last_browser_request_at = 0.0
+
+
+def _ledger_path(save_path: str) -> Path:
+    return Path(save_path) / "download_ledger.jsonl"
+
+
+def _paper_download_key(doi: str = "", title: str = "", url: str = "") -> str:
+    if doi:
+        return f"doi:{_norm_id(doi)}"
+    if title:
+        title_norm = re.sub(r"[^\w\s]", "", title.casefold())
+        return "title:" + " ".join(title_norm.split())
+    return f"url:{url.strip().casefold()}"
+
+
+def _publisher_from_url(value: str) -> str:
+    v = (value or "").casefold()
+    if "sciencedirect.com" in v or "elsevier" in v:
+        return "sciencedirect"
+    if "springer" in v or "nature.com" in v:
+        return "springer"
+    if "tandfonline.com" in v or "taylorfrancis" in v:
+        return "taylor-francis"
+    if "sagepub.com" in v:
+        return "sage"
+    if "wiley" in v:
+        return "wiley"
+    if "jbe-platform" in v or "benjamins.com" in v:
+        return "benjamins"
+    if "mitpress" in v or "direct.mit.edu" in v:
+        return "mitpress"
+    if "aclanthology" in v or "aclweb" in v or "arxiv.org" in v:
+        return "open-pdf"
+    return "general"
+
+
+_PUBLISHER_DELAY_SECONDS = {
+    "sciencedirect": (45, 90),
+    "springer": (30, 60),
+    "taylor-francis": (45, 90),
+    "sage": (30, 60),
+    "wiley": (45, 90),
+    "benjamins": (60, 120),
+    "mitpress": (30, 60),
+    "open-pdf": (5, 15),
+    "general": (20, 45),
+}
+
+
+def _human_delay_seconds(publisher: str) -> float:
+    lo, hi = _PUBLISHER_DELAY_SECONDS.get(publisher, _PUBLISHER_DELAY_SECONDS["general"])
+    return random.uniform(lo, hi)
+
+
+def _read_download_ledger(save_path: str, max_entries: int = 2000) -> list[dict[str, Any]]:
+    path = _ledger_path(save_path)
+    if not path.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()[-max_entries:]:
+            if not line.strip():
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    except Exception:
+        return []
+    return out
+
+
+def _append_download_ledger(save_path: str, record: dict[str, Any]) -> None:
+    path = _ledger_path(save_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = dict(record)
+    row["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+
+
+def _find_verified_ledger_hit(save_path: str, key: str, title: str = "") -> dict[str, Any] | None:
+    for rec in reversed(_read_download_ledger(save_path)):
+        if rec.get("key") != key or rec.get("status") != "success":
+            continue
+        pdf_path = rec.get("download_path") or ""
+        if not pdf_path or not Path(pdf_path).exists():
+            continue
+        pdf_result = _pdf_result_from_path(pdf_path, title or rec.get("title") or "")
+        if pdf_result["verified"]:
+            return {**rec, **pdf_result, "success": True, "reused_from_ledger": True}
+    return None
+
+
+def _recent_retry_block(save_path: str, key: str) -> dict[str, Any] | None:
+    """Return a recent failure record that should not be retried immediately."""
+    now = time.time()
+    for rec in reversed(_read_download_ledger(save_path, max_entries=500)):
+        if rec.get("key") != key or rec.get("status") == "success":
+            continue
+        try:
+            retry_after = float(rec.get("retry_after_epoch") or 0)
+        except (TypeError, ValueError):
+            retry_after = 0
+        if retry_after > now:
+            return rec
+    return None
+
+
+def _retry_after_for_status(status: str) -> float:
+    now = time.time()
+    if status in ("title_mismatch", "wrong_pdf"):
+        return now + 7 * 24 * 3600
+    if status == "needs_login":
+        return now + 10 * 60
+    if status in ("timeout", "browser_timeout"):
+        return now + 10 * 60
+    if status in ("forbidden", "access_denied"):
+        return now + 24 * 3600
+    return now + 30 * 60
+
+
 def _clean_abstract(value: Any) -> str:
     """Strip JATS/XML tags and clean up abstract text."""
     if not value:
@@ -1109,6 +1233,13 @@ def ping() -> dict[str, Any]:
             "embed_entries": len(_embed_cache),
             "author_hindex_cached": len(_author_hindex),
         },
+        "browser_download_policy": {
+            "max_parallel": 1,
+            "human_delay_default": True,
+            "ledger_file": "<save_path>/download_ledger.jsonl",
+            "profile_path": str(Path.home() / ".cache" / "research-mcp" / "browser-profile"),
+            "verification": "PDF text must match requested title keywords",
+        },
         "fastembed_available": _get_embedder() is not None,
     }
 
@@ -1347,6 +1478,9 @@ async def browser_download(
     timeout_seconds: int = 180,
     headless: bool = False,
     use_ezproxy: bool = True,
+    reuse_existing: bool = True,
+    force: bool = False,
+    human_delay: bool = True,
 ) -> dict[str, Any]:
     """Download a paywalled paper through a real browser session.
 
@@ -1358,6 +1492,7 @@ async def browser_download(
     delete mismatched PDFs and return success=False rather than accepting a wrong
     repository fallback as a valid paper.
     """
+    global _last_browser_request_at
     candidates = _browser_candidate_urls(doi=doi, url=url)
     if not candidates:
         return {
@@ -1380,13 +1515,32 @@ async def browser_download(
         "success": False,
         "doi": doi,
         "title": title,
+        "key": _paper_download_key(doi=doi, title=title, url=url),
         "save_path": str(out_dir),
         "profile_path": str(profile_dir),
         "ezproxy": ezproxy,
         "headless": headless,
+        "reuse_existing": reuse_existing,
+        "force": force,
+        "human_delay": human_delay,
         "attempts": [],
         "candidates": candidates,
     }
+
+    key = result["key"]
+    if reuse_existing and not force:
+        cached = _find_verified_ledger_hit(str(out_dir), key, title)
+        if cached:
+            return {**result, **cached, "success": True, "status": "reused"}
+        blocked = _recent_retry_block(str(out_dir), key)
+        if blocked:
+            return {
+                **result,
+                "success": False,
+                "status": "retry_blocked",
+                "error": "recent failed attempt is still in cooldown; use force=True to override",
+                "last_failure": blocked,
+            }
 
     try:
         from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
@@ -1408,6 +1562,7 @@ async def browser_download(
                 "success": True,
                 "doi": doi,
                 "title": title,
+                "key": key,
                 "download_path": saved,
                 "source": source,
                 "source_url": source_url,
@@ -1425,6 +1580,35 @@ async def browser_download(
             "text_length": pdf_result.get("text_length", 0),
         })
         return None
+
+    def _record_success(saved_result: dict[str, Any]) -> dict[str, Any]:
+        record = {
+            "key": key,
+            "doi": doi,
+            "title": title,
+            "status": "success",
+            "download_path": saved_result.get("download_path"),
+            "source": saved_result.get("source"),
+            "source_url": saved_result.get("source_url"),
+            "text_length": saved_result.get("text_length"),
+            "verification": saved_result.get("verification"),
+        }
+        _append_download_ledger(str(out_dir), record)
+        saved_result["ledger_path"] = str(_ledger_path(str(out_dir)))
+        saved_result["status"] = "success"
+        return saved_result
+
+    def _record_failure(status: str, error: str = "") -> None:
+        _append_download_ledger(str(out_dir), {
+            "key": key,
+            "doi": doi,
+            "title": title,
+            "status": status,
+            "error": error or result.get("error"),
+            "retry_after_epoch": _retry_after_for_status(status),
+            "attempt_count": len(result.get("attempts", [])),
+            "attempts_tail": result.get("attempts", [])[-5:],
+        })
 
     async def _wait_for_possible_sso(page) -> None:
         """If an SSO/login page is visible, give the user time to finish it."""
@@ -1474,6 +1658,20 @@ async def browser_download(
                 out.append(urljoin(page.url, href))
         return _dedupe_preserve_order(out)
 
+    await _browser_download_lock.acquire()
+    result["queued"] = True
+    result["queue_policy"] = "single browser_download at a time"
+    publisher = _publisher_from_url(candidates[0] if candidates else url)
+    result["publisher"] = publisher
+    if human_delay and _last_browser_request_at > 0:
+        target_wait = _human_delay_seconds(publisher)
+        elapsed = time.monotonic() - _last_browser_request_at
+        wait_s = max(0.0, target_wait - elapsed)
+        if wait_s > 0:
+            result["human_delay_seconds"] = round(wait_s, 1)
+            await asyncio.sleep(wait_s)
+    _last_browser_request_at = time.monotonic()
+
     async with async_playwright() as p:
         launch_kwargs = {
             "headless": headless,
@@ -1486,7 +1684,13 @@ async def browser_download(
                 str(profile_dir), channel="chrome", **launch_kwargs
             )
         except Exception:
-            context = await p.chromium.launch_persistent_context(str(profile_dir), **launch_kwargs)
+            try:
+                context = await p.chromium.launch_persistent_context(str(profile_dir), **launch_kwargs)
+            except Exception as exc:
+                result["error"] = f"could not launch Playwright browser: {type(exc).__name__}: {str(exc)[:200]}"
+                _record_failure("browser_error", result["error"])
+                _browser_download_lock.release()
+                return result
 
         try:
             page = context.pages[0] if context.pages else await context.new_page()
@@ -1521,7 +1725,8 @@ async def browser_download(
                             if response.status == 200 and "pdf" in ct:
                                 saved_result = await _try_save_pdf(await response.body(), visit_url, "browser-page")
                                 if saved_result:
-                                    return saved_result
+                                    _browser_download_lock.release()
+                                    return _record_success(saved_result)
                         request_urls.append(page.url)
                         request_urls.extend(await _collect_links(page))
                     except PlaywrightTimeoutError:
@@ -1556,7 +1761,8 @@ async def browser_download(
                         if resp.status == 200 and ("pdf" in ct or body[:5] == PDF_MAGIC):
                             saved_result = await _try_save_pdf(body, fetch_url, "browser-request")
                             if saved_result:
-                                return saved_result
+                                _browser_download_lock.release()
+                                return _record_success(saved_result)
                     except Exception as exc:
                         result["attempts"].append({"url": fetch_url, "status": f"request-error:{type(exc).__name__}:{str(exc)[:120]}"})
         finally:
@@ -1566,10 +1772,21 @@ async def browser_download(
             except Exception:
                 pass
 
-    result["error"] = (
-        "browser_download could not get a verified PDF. If needs_login=True, rerun and finish "
-        "PolyU SSO in the opened browser window; cookies will persist for future calls."
-    )
+    has_mismatch = any(a.get("status") == "pdf-title-mismatch-or-empty-text" for a in result.get("attempts", []))
+    failure_status = "title_mismatch" if has_mismatch else ("needs_login" if result.get("needs_login") else "browser_timeout")
+    result["status"] = failure_status
+    if failure_status == "title_mismatch":
+        result["error"] = "downloaded PDF(s) did not match the requested paper title; mismatched files were deleted"
+    elif failure_status == "needs_login":
+        result["error"] = (
+            "browser_download needs PolyU SSO. Finish login in the opened browser window; "
+            "cookies will persist for future calls."
+        )
+    else:
+        result["error"] = "browser_download could not get a verified PDF before timeout"
+    _record_failure(failure_status, result["error"])
+    if _browser_download_lock.locked():
+        _browser_download_lock.release()
     return result
 
 

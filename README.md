@@ -168,6 +168,25 @@ browser_download(
 
 `browser_download` stores cookies in `~/.cache/research-mcp/browser-profile` by default. First run may require manual SSO/2FA in the opened browser window; later calls reuse that institutional session. It verifies PDF text against the requested title and deletes mismatched PDFs.
 
+### Browser Download Guardrails
+
+`browser_download` is designed for institutional access, not scraping:
+
+- **Single-flight queue**: max 1 browser download at a time inside the MCP process.
+- **Human-speed delays**: enabled by default between browser downloads. Publisher-specific ranges: ScienceDirect/Taylor/Wiley 45-90s, Springer/SAGE/MIT Press 30-60s, Benjamins/JBE 60-120s, open PDFs 5-15s.
+- **Download ledger**: every success/failure is appended to `<save_path>/download_ledger.jsonl`.
+- **Reuse existing PDFs**: if the ledger has a verified PDF for the DOI/title, the tool returns it without opening the browser again.
+- **Retry backoff**: recent failures block immediate retry unless `force=True`. Title mismatches are blocked for 7 days; login/timeouts use shorter cooldowns.
+- **Verification-first**: success requires extracted PDF text to match requested title keywords. Wrong PDFs are deleted automatically.
+
+Useful params:
+
+```python
+browser_download(..., reuse_existing=True, force=False, human_delay=True)
+```
+
+For tests on public PDFs only, set `human_delay=False`. For real institutional downloads, keep `human_delay=True`.
+
 ## Sources
 
 | Source | Type | Key Required? |

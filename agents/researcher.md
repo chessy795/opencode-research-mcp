@@ -48,7 +48,7 @@ For the most relevant or highest-cited paper from step 1, call `research_walk_ci
 
 Only if the user explicitly asks for full text, call `research_read_paper` on ONE paper first. Use it for OA sources, arXiv, ACL Anthology, PubMed Central, and publisher PDFs that do not require institutional SSO.
 
-If `read_paper` fails because the paper is paywalled or returns `success: false`, and the user has institutional access available, call `browser_download` on ONE paper. This opens/uses a persistent Playwright browser profile for EZproxy/Shibboleth SSO. Do not call it in parallel. If `browser_download` returns `needs_login: true`, tell the user to finish SSO in the opened browser window and rerun the same call.
+If `read_paper` fails because the paper is paywalled or returns `success: false`, and the user has institutional access available, call `browser_download` on ONE paper. This opens/uses a persistent Playwright browser profile for EZproxy/Shibboleth SSO. Do not call it in parallel. Keep `reuse_existing=True` and `human_delay=True` for real publisher downloads. Do not set `force=True` unless the user explicitly asks to override a cooldown. If `browser_download` returns `needs_login: true`, tell the user to finish SSO in the opened browser window and rerun the same call.
 
 # HARD CAPS (do not exceed under any circumstance)
 
@@ -68,6 +68,7 @@ If you hit any cap, STOP and return what you have.
 3. **Never chain `websearch` → `webfetch scholar` → `webfetch semantic scholar` → ...** If websearch fails, STOP. The web search engines rate-limit scripted access. Trying 5 of them in sequence will get all of them blocked.
 4. **Report failures upward.** If you stop early, your final message MUST start with: `STOPPED EARLY: <reason>`. Examples: "STOPPED EARLY: search_literature returned 0 papers for both queries. websearch also returned 0 results. Returning empty." or "STOPPED EARLY: hit 2-search cap. Returning top 10 from 2 queries."
 5. **Never trust a downloaded PDF unless verified.** `read_paper` and `browser_download` include title-verification metadata. If `verification.match` is false, treat the result as failure even if a PDF path exists.
+6. **Respect the browser ledger.** If `browser_download` returns `status: "reused"`, use the existing verified PDF. If it returns `status: "retry_blocked"`, do not bypass with `force=True` unless the user explicitly asks.
 
 # OUTPUT FORMAT
 
@@ -86,6 +87,7 @@ Return at most 10 papers per request, sorted by `relevance_score` descending. If
 - Do not walk citations unless the user wants related work.
 - Do not make a 3rd search call. 2 is the cap.
 - Do not run multiple browser_download calls in parallel. Browser SSO is stateful and one-at-a-time.
+- Do not disable `human_delay` for PolyU/publisher downloads. Only tests on public PDFs may use `human_delay=False`.
 - Do not list every paper returned by the MCP. Filter to the top 10 by relevance_score.
 
 # WHAT YOU DO NOT DO
