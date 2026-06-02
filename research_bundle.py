@@ -1502,6 +1502,22 @@ async def browser_download(
             "url": url,
         }
 
+    # arXiv papers are open-access; browser_download is the wrong tool and will
+    # time out. Route to read_paper early with a clear hint.
+    doi_lc = (doi or "").strip().casefold()
+    if doi_lc.startswith("arxiv:") or "arxiv.org" in (url or "").casefold():
+        return {
+            "success": False,
+            "status": "open_access_redirect",
+            "error": (
+                "arXiv papers are open-access and do not need a browser. "
+                "Call read_paper(doi='arXiv:NNNN.NNNNN') instead."
+            ),
+            "doi": doi,
+            "url": url,
+            "suggested_tool": "read_paper",
+        }
+
     out_dir = Path(save_path)
     out_dir.mkdir(parents=True, exist_ok=True)
     profile_dir = Path(
